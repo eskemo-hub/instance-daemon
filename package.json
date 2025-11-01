@@ -1,0 +1,43 @@
+{
+  "name": "n8n-daemon",
+  "version": "1.15.0",
+  "description": "Daemon service for managing n8n Docker containers",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "prebuild": "npm install",
+    "build": "tsc",
+    "postbuild": "echo 'Build completed successfully'",
+    "start": "node dist/index.js",
+    "type-check": "tsc --noEmit",
+    "validate-env": "ts-node-dev --transpile-only src/utils/validate-env-cli.ts",
+    "clean": "rm -rf dist node_modules package-lock.json",
+    "fresh-install": "npm run clean && npm install && npm run build"
+  },
+  "keywords": [
+    "n8n",
+    "docker",
+    "daemon"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "bcrypt": "^5.1.1",
+    "better-sqlite3": "^9.2.2",
+    "cors": "^2.8.5",
+    "dockerode": "^4.0.2",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/cors": "^2.8.19",
+    "@types/dockerode": "^3.3.45",
+    "@types/express": "^4.17.25",
+    "@types/node": "^20.19.24",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.3.3"
+  }
+}

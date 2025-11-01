@@ -1,0 +1,14 @@
+[Unit]
+Description=n8n Daemon Update Service
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+EnvironmentFile=-/tmp/n8n-update.env
+ExecStart=/opt/n8n-daemon/update-from-github.sh
+StandardOutput=append:/tmp/n8n-daemon-update.log
+StandardError=append:/tmp/n8n-daemon-update.log
+
+[Install]
+WantedBy=multi-user.target

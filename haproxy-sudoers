@@ -1,0 +1,16 @@
+# Allow n8n-daemon user to manage HAProxy and firewall without password
+# Copy this file to /etc/sudoers.d/n8n-daemon-haproxy
+# 
+# HAProxy reads config from /opt/n8n-daemon/haproxy/haproxy.cfg (writable by daemon)
+# Daemon manages HAProxy and UFW firewall rules for database security
+
+# HAProxy management
+n8n-daemon ALL=(ALL) NOPASSWD: /bin/systemctl reload haproxy
+n8n-daemon ALL=(ALL) NOPASSWD: /bin/systemctl restart haproxy
+n8n-daemon ALL=(ALL) NOPASSWD: /bin/systemctl status haproxy
+
+# UFW firewall management (for database port security)
+n8n-daemon ALL=(ALL) NOPASSWD: /usr/sbin/ufw status
+n8n-daemon ALL=(ALL) NOPASSWD: /usr/sbin/ufw allow *
+n8n-daemon ALL=(ALL) NOPASSWD: /usr/sbin/ufw deny *
+n8n-daemon ALL=(ALL) NOPASSWD: /usr/sbin/ufw delete *
