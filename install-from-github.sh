@@ -18,7 +18,7 @@ echo -e "${BLUE}╔════════════════════�
 echo ""
 
 # Configuration
-GITHUB_REPO="${GITHUB_REPO:-eskemo-hub/n8n-daemon}"
+GITHUB_REPO="${GITHUB_REPO:-eskemo-hub/instance-daemon}"
 GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
 INSTALL_DIR="/opt/n8n-daemon"
 DAEMON_USER="n8n-daemon"

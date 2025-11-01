@@ -29,7 +29,7 @@ A standalone daemon service for managing n8n instances with Docker containers, p
 export GITHUB_TOKEN=your_github_token_here
 
 # Download and run the installation script
-curl -fsSL https://raw.githubusercontent.com/eskemo-hub/n8n-daemon/main/install-from-github.sh | sudo -E bash
+curl -fsSL https://raw.githubusercontent.com/eskemo-hub/instance-daemon/main/install-from-github.sh | sudo -E bash
 ```
 
 ## Development Setup
