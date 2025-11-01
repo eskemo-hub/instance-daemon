@@ -99,46 +99,43 @@ sudo apt install git -y
 
 2. **Create a dedicated user for the daemon**:
 ```bash
-sudo useradd -r -s /bin/bash -d /opt/n8n-daemon n8n-daemon
+# Create system user (no login shell, no password needed)
+sudo useradd -r -s /bin/false -d /opt/n8n-daemon -c "N8N Daemon User" n8n-daemon
 sudo mkdir -p /opt/n8n-daemon
 sudo chown n8n-daemon:n8n-daemon /opt/n8n-daemon
 ```
 
 3. **Clone the repository**:
 ```bash
-# Switch to the daemon user
-sudo su - n8n-daemon
-
-# Clone the repository
-cd /opt/n8n-daemon
-git clone https://github.com/eskemo-hub/instance-daemon.git daemon
-cd daemon
+# Clone as admin user, then fix ownership
+sudo git clone https://github.com/eskemo-hub/instance-daemon.git /opt/n8n-daemon/daemon
+sudo chown -R n8n-daemon:n8n-daemon /opt/n8n-daemon/daemon
 ```
 
 4. **Install dependencies and build**:
 ```bash
+# Navigate to daemon directory
 cd /opt/n8n-daemon/daemon
-npm install
-npm run build
+
+# Install and build as daemon user (no password required)
+sudo -u n8n-daemon npm install
+sudo -u n8n-daemon npm run build
 ```
 
 5. **Configure environment variables**:
 ```bash
-# Copy the example environment file
-cp .env.example .env
+# Copy and configure environment file as daemon user
+sudo -u n8n-daemon cp .env.example .env
 
 # Generate a secure API key
 openssl rand -base64 32
 
-# Edit the .env file with your settings
-nano .env
+# Edit the .env file (as admin user for nano access)
+sudo nano .env
 ```
 
 6. **Install and start the systemd service**:
 ```bash
-# Exit from daemon user back to your admin user
-exit
-
 # Install the systemd service
 sudo cp /opt/n8n-daemon/daemon/n8n-daemon.service /etc/systemd/system/
 sudo systemctl daemon-reload
