@@ -1,0 +1,2 @@
+# Allow n8n-daemon user to run journalctl without password
+n8n-daemon ALL=(ALL) NOPASSWD: /usr/bin/journalctl -u n8n-daemon *

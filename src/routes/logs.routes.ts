@@ -14,40 +14,45 @@ const logsService = new ContainerLogsService();
  */
 router.get('/', async (_req: Request, res: Response) => {
   try {
-    // Try to get logs from systemd journal first
+    // Try to get logs from systemd journal with sudo
     try {
-      const { stdout } = await execAsync('journalctl -u n8n-daemon -n 100 --no-pager');
+      const { stdout } = await execAsync('sudo journalctl -u n8n-daemon -n 100 --no-pager');
       return res.json(apiSuccess({
         logs: stdout.trim(),
         source: 'systemd-journal'
       }));
     } catch (journalError) {
-      // If journal access fails (permissions), provide alternative info
-      console.warn('Cannot access systemd journal:', journalError);
-      
-      // Return basic daemon info instead
-      const daemonInfo = [
-        `Daemon is running (PID: ${process.pid})`,
-        `Started at: ${new Date().toISOString()}`,
-        `Node.js version: ${process.version}`,
-        `Platform: ${process.platform}`,
-        `Architecture: ${process.arch}`,
-        `Working directory: ${process.cwd()}`,
-        '',
-        'Note: Cannot access systemd journal logs due to insufficient permissions.',
-        'To fix this, add the daemon user to the systemd-journal group:',
-        '  sudo usermod -a -G systemd-journal daemon',
-        '  sudo systemctl restart n8n-daemon',
-        '',
-        'Or view logs directly with:',
-        '  sudo journalctl -u n8n-daemon -f'
-      ].join('\n');
-      
-      return res.json(apiSuccess({
-        logs: daemonInfo,
-        source: 'daemon-info',
-        warning: 'Cannot access systemd journal - insufficient permissions'
-      }));
+      // If journal access fails, try without sudo as fallback
+      try {
+        const { stdout } = await execAsync('journalctl -u n8n-daemon -n 100 --no-pager');
+        return res.json(apiSuccess({
+          logs: stdout.trim(),
+          source: 'systemd-journal'
+        }));
+      } catch (fallbackError) {
+        // If both fail, provide daemon info instead
+        console.warn('Cannot access systemd journal (tried with and without sudo):', fallbackError);
+        
+        // Return basic daemon info instead
+        const daemonInfo = [
+          `Daemon is running (PID: ${process.pid})`,
+          `Started at: ${new Date().toISOString()}`,
+          `Node.js version: ${process.version}`,
+          `Platform: ${process.platform}`,
+          `Architecture: ${process.arch}`,
+          `Working directory: ${process.cwd()}`,
+          '',
+          'Note: Cannot access systemd journal logs.',
+          'View logs directly with:',
+          '  sudo journalctl -u n8n-daemon -f'
+        ].join('\n');
+        
+        return res.json(apiSuccess({
+          logs: daemonInfo,
+          source: 'daemon-info',
+          warning: 'Cannot access systemd journal'
+        }));
+      }
     }
   } catch (error) {
     console.error('Failed to get logs:', error);
