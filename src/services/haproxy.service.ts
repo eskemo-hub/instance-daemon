@@ -123,8 +123,26 @@ export class HAProxyService {
     // Generate config
     const config = this.generateFullConfig(postgresBackends, mysqlBackends);
     
-    // Write config
+    // Write config locally first
     fs.writeFileSync(this.HAPROXY_CONFIG, config, { mode: 0o644 });
+    
+    // Ensure system HAProxy directory exists
+    const systemHAProxyDir = '/opt/n8n-daemon/haproxy';
+    const systemHAProxyConfig = path.join(systemHAProxyDir, 'haproxy.cfg');
+    
+    try {
+      // Create directory if it doesn't exist
+      execSync(`sudo mkdir -p ${systemHAProxyDir}`, { stdio: 'pipe' });
+      
+      // Copy config to system location
+      execSync(`sudo cp ${this.HAPROXY_CONFIG} ${systemHAProxyConfig}`, { stdio: 'pipe' });
+      
+      // Set proper permissions
+      execSync(`sudo chown haproxy:haproxy ${systemHAProxyConfig}`, { stdio: 'pipe' });
+      execSync(`sudo chmod 644 ${systemHAProxyConfig}`, { stdio: 'pipe' });
+    } catch (error) {
+      throw new Error(`Failed to deploy HAProxy configuration: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
     
     // Reload HAProxy
     await this.reloadHAProxy();
@@ -255,8 +273,9 @@ defaults
    */
   private async reloadHAProxy(): Promise<void> {
     try {
-      // Test configuration first
-      execSync(`haproxy -c -f ${this.HAPROXY_CONFIG}`, { stdio: 'pipe' });
+      // Test configuration first using the system config location
+      const systemHAProxyConfig = '/opt/n8n-daemon/haproxy/haproxy.cfg';
+      execSync(`sudo haproxy -c -f ${systemHAProxyConfig}`, { stdio: 'pipe' });
       
       // Reload if valid (HAProxy reads from /opt/n8n-daemon/haproxy/haproxy.cfg)
       execSync('sudo systemctl reload haproxy', { stdio: 'pipe' });
