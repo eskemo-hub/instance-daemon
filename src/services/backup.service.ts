@@ -1,0 +1,296 @@
+import Database from 'better-sqlite3';
+import * as fs from 'fs';
+import * as path from 'path';
+
+/**
+ * BackupService handles reading n8n SQLite databases from Docker volumes
+ * and extracting workflow and execution data for backup and analytics
+ */
+
+export interface N8nWorkflow {
+  id: string;
+  name: string;
+  active: boolean;
+  nodes: any;
+  connections: any;
+  settings: any;
+  tags?: any;
+  staticData?: any;
+  versionId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface N8nExecution {
+  id: string;
+  workflowId: string;
+  finished: boolean;
+  mode: string;
+  startedAt: string;
+  stoppedAt?: string;
+  waitTill?: string;
+  status: string;
+}
+
+export interface ExecutionStatsDaily {
+  date: string;
+  totalExecutions: number;
+  successCount: number;
+  errorCount: number;
+  waitingCount: number;
+  avgDuration: number | null;
+  maxDuration: number | null;
+  minDuration: number | null;
+}
+
+export interface BackupData {
+  workflows: N8nWorkflow[];
+  executionStats: ExecutionStatsDaily[];
+  totalWorkflows: number;
+  activeWorkflows: number;
+  totalExecutions: number;
+  storageUsed: number;
+}
+
+export class BackupService {
+  private readonly VOLUME_BASE_PATH = '/var/lib/docker/volumes';
+
+  /**
+   * Get the path to the n8n database file in a Docker volume
+   */
+  private getDatabasePath(volumeName: string): string {
+    return path.join(this.VOLUME_BASE_PATH, volumeName, '_data', 'database.sqlite');
+  }
+
+  /**
+   * Check if database file exists and is accessible
+   */
+  private async checkDatabaseExists(volumeName: string): Promise<boolean> {
+    const dbPath = this.getDatabasePath(volumeName);
+    try {
+      await fs.promises.access(dbPath, fs.constants.R_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get database file size in bytes
+   */
+  private async getDatabaseSize(volumeName: string): Promise<number> {
+    const dbPath = this.getDatabasePath(volumeName);
+    try {
+      const stats = await fs.promises.stat(dbPath);
+      return stats.size;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Open n8n SQLite database in read-only mode
+   */
+  private openDatabase(volumeName: string): Database.Database {
+    const dbPath = this.getDatabasePath(volumeName);
+    
+    if (!fs.existsSync(dbPath)) {
+      throw new Error(`Database not found at ${dbPath}`);
+    }
+
+    try {
+      return new Database(dbPath, { readonly: true, fileMustExist: true });
+    } catch (error) {
+      throw new Error(`Failed to open database: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Extract all workflows from n8n database
+   */
+  async extractWorkflows(volumeName: string): Promise<N8nWorkflow[]> {
+    const exists = await this.checkDatabaseExists(volumeName);
+    if (!exists) {
+      throw new Error(`Database not found for volume: ${volumeName}`);
+    }
+
+    const db = this.openDatabase(volumeName);
+    
+    try {
+      // n8n stores workflows in workflow_entity table
+      const workflows = db.prepare(`
+        SELECT 
+          id,
+          name,
+          active,
+          nodes,
+          connections,
+          settings,
+          staticData,
+          versionId,
+          createdAt,
+          updatedAt
+        FROM workflow_entity
+        ORDER BY updatedAt DESC
+      `).all() as any[];
+
+      // Parse JSON fields and get tags
+      const workflowsWithTags = workflows.map(w => {
+        // Get tags for this workflow
+        const tags = db.prepare(`
+          SELECT t.id, t.name
+          FROM tag_entity t
+          INNER JOIN workflows_tags wt ON wt.tagId = t.id
+          WHERE wt.workflowId = ?
+        `).all(w.id);
+
+        return {
+          id: String(w.id),
+          name: w.name,
+          active: Boolean(w.active),
+          nodes: typeof w.nodes === 'string' ? JSON.parse(w.nodes) : w.nodes,
+          connections: typeof w.connections === 'string' ? JSON.parse(w.connections) : w.connections,
+          settings: typeof w.settings === 'string' ? JSON.parse(w.settings) : w.settings,
+          tags: tags.length > 0 ? tags : undefined,
+          staticData: w.staticData ? (typeof w.staticData === 'string' ? JSON.parse(w.staticData) : w.staticData) : undefined,
+          versionId: w.versionId ? String(w.versionId) : undefined,
+          createdAt: w.createdAt,
+          updatedAt: w.updatedAt,
+        };
+      });
+
+      return workflowsWithTags;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Extract execution statistics aggregated by day
+   */
+  async extractExecutionStats(volumeName: string, daysBack: number = 30): Promise<ExecutionStatsDaily[]> {
+    const exists = await this.checkDatabaseExists(volumeName);
+    if (!exists) {
+      throw new Error(`Database not found for volume: ${volumeName}`);
+    }
+
+    const db = this.openDatabase(volumeName);
+    
+    try {
+      const sinceDate = new Date();
+      sinceDate.setDate(sinceDate.getDate() - daysBack);
+      const sinceDateStr = sinceDate.toISOString();
+
+      // n8n stores executions in execution_entity table
+      const stats = db.prepare(`
+        SELECT 
+          DATE(startedAt) as date,
+          COUNT(*) as totalExecutions,
+          SUM(CASE WHEN finished = 1 AND status = 'success' THEN 1 ELSE 0 END) as successCount,
+          SUM(CASE WHEN finished = 1 AND status = 'error' THEN 1 ELSE 0 END) as errorCount,
+          SUM(CASE WHEN finished = 0 OR waitTill IS NOT NULL THEN 1 ELSE 0 END) as waitingCount,
+          AVG(
+            CASE 
+              WHEN finished = 1 AND stoppedAt IS NOT NULL 
+              THEN (julianday(stoppedAt) - julianday(startedAt)) * 86400000 
+              ELSE NULL 
+            END
+          ) as avgDuration,
+          MAX(
+            CASE 
+              WHEN finished = 1 AND stoppedAt IS NOT NULL 
+              THEN (julianday(stoppedAt) - julianday(startedAt)) * 86400000 
+              ELSE NULL 
+            END
+          ) as maxDuration,
+          MIN(
+            CASE 
+              WHEN finished = 1 AND stoppedAt IS NOT NULL 
+              THEN (julianday(stoppedAt) - julianday(startedAt)) * 86400000 
+              ELSE NULL 
+            END
+          ) as minDuration
+        FROM execution_entity
+        WHERE startedAt >= ?
+        GROUP BY DATE(startedAt)
+        ORDER BY date DESC
+      `).all(sinceDateStr) as any[];
+
+      return stats.map(s => ({
+        date: s.date,
+        totalExecutions: s.totalExecutions,
+        successCount: s.successCount,
+        errorCount: s.errorCount,
+        waitingCount: s.waitingCount,
+        avgDuration: s.avgDuration,
+        maxDuration: s.maxDuration,
+        minDuration: s.minDuration,
+      }));
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Get complete backup data for an instance
+   */
+  async getBackupData(volumeName: string, daysBack: number = 30): Promise<BackupData> {
+    const workflows = await this.extractWorkflows(volumeName);
+    const executionStats = await this.extractExecutionStats(volumeName, daysBack);
+    const storageUsed = await this.getDatabaseSize(volumeName);
+
+    const activeWorkflows = workflows.filter(w => w.active).length;
+    const totalExecutions = executionStats.reduce((sum, stat) => sum + stat.totalExecutions, 0);
+
+    return {
+      workflows,
+      executionStats,
+      totalWorkflows: workflows.length,
+      activeWorkflows,
+      totalExecutions,
+      storageUsed,
+    };
+  }
+
+  /**
+   * Get quick stats without full workflow data (for health checks)
+   */
+  async getQuickStats(volumeName: string): Promise<{
+    totalWorkflows: number;
+    activeWorkflows: number;
+    storageUsed: number;
+  }> {
+    const exists = await this.checkDatabaseExists(volumeName);
+    if (!exists) {
+      return {
+        totalWorkflows: 0,
+        activeWorkflows: 0,
+        storageUsed: 0,
+      };
+    }
+
+    const db = this.openDatabase(volumeName);
+    
+    try {
+      const result = db.prepare(`
+        SELECT 
+          COUNT(*) as total,
+          SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active
+        FROM workflow_entity
+      `).get() as any;
+
+      const storageUsed = await this.getDatabaseSize(volumeName);
+
+      return {
+        totalWorkflows: result.total || 0,
+        activeWorkflows: result.active || 0,
+        storageUsed,
+      };
+    } finally {
+      db.close();
+    }
+  }
+}
+
+// Export singleton instance
+export const backupService = new BackupService();

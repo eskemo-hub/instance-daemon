@@ -1,0 +1,34 @@
+[Unit]
+Description=n8n Daemon Service
+Documentation=https://github.com/yourusername/n8n-instance-manager
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=daemon
+Group=daemon
+WorkingDirectory=/opt/n8n-daemon/daemon
+ExecStart=/usr/bin/node /opt/n8n-daemon/daemon/dist/index.js
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=n8n-daemon
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/n8n-daemon /mnt/data
+
+# Environment
+Environment=NODE_ENV=production
+
+# Resource limits
+LimitNOFILE=65536
+MemoryLimit=512M
+
+[Install]
+WantedBy=multi-user.target
