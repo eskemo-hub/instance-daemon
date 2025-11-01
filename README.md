@@ -18,9 +18,26 @@ The daemon is responsible for:
 
 ## Quick Start
 
-For development:
+### Remote Server Installation (One Command)
 
-1. Clone or copy the daemon directory to your host server
+For quick installation on a remote server:
+
+```bash
+# Run this command on your remote server
+curl -fsSL https://raw.githubusercontent.com/eskemo-hub/instance-daemon/main/install.sh | bash
+```
+
+*Note: This will install prerequisites, create the daemon user, clone the repository, and set up the service.*
+
+### Development Setup
+
+For local development:
+
+1. Clone the repository:
+```bash
+git clone https://github.com/eskemo-hub/instance-daemon.git
+cd instance-daemon
+```
 
 2. Install dependencies:
 ```bash
@@ -51,31 +68,85 @@ npm run validate-env
 
 ## Production Installation
 
-For production deployment with systemd service:
+For production deployment with systemd service on a remote server:
 
-1. Install Node.js 18+ and Docker on your Linux server
-2. Create a dedicated user for the daemon:
+### Prerequisites
+- Ubuntu/Debian Linux server
+- Git installed
+- Node.js 18+ installed
+- Docker and Docker Compose installed
+- Root or sudo access
+
+### Installation Steps
+
+1. **Install prerequisites** (if not already installed):
+```bash
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install Node.js 18+
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+sudo usermod -aG docker $USER
+
+# Install Git (if not installed)
+sudo apt install git -y
+```
+
+2. **Create a dedicated user for the daemon**:
 ```bash
 sudo useradd -r -s /bin/bash -d /opt/n8n-daemon n8n-daemon
 sudo mkdir -p /opt/n8n-daemon
 sudo chown n8n-daemon:n8n-daemon /opt/n8n-daemon
 ```
 
-3. Copy the daemon files to `/opt/n8n-daemon/daemon/`
-4. Install dependencies and build:
+3. **Clone the repository**:
+```bash
+# Switch to the daemon user
+sudo su - n8n-daemon
+
+# Clone the repository
+cd /opt/n8n-daemon
+git clone https://github.com/eskemo-hub/instance-daemon.git daemon
+cd daemon
+```
+
+4. **Install dependencies and build**:
 ```bash
 cd /opt/n8n-daemon/daemon
 npm install
 npm run build
 ```
 
-5. Configure environment variables in `.env`
-6. Install the systemd service:
+5. **Configure environment variables**:
 ```bash
-sudo cp n8n-daemon.service /etc/systemd/system/
+# Copy the example environment file
+cp .env.example .env
+
+# Generate a secure API key
+openssl rand -base64 32
+
+# Edit the .env file with your settings
+nano .env
+```
+
+6. **Install and start the systemd service**:
+```bash
+# Exit from daemon user back to your admin user
+exit
+
+# Install the systemd service
+sudo cp /opt/n8n-daemon/daemon/n8n-daemon.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable n8n-daemon
 sudo systemctl start n8n-daemon
+
+# Check service status
+sudo systemctl status n8n-daemon
 ```
 
 ## Development
