@@ -276,9 +276,10 @@ export class DockerService {
       try {
         const container = this.docker.getContainer(containerId);
         
-        // Get container info to find associated volumes
+        // Get container info to find associated volumes and bind mounts
         const containerInfo = await container.inspect();
         const volumeNames = removeVolumes ? this.extractVolumeNames(containerInfo) : [];
+        const bindMountPaths = removeVolumes ? this.extractBindMountPaths(containerInfo) : [];
 
         // Stop container if running
         try {
@@ -294,15 +295,30 @@ export class DockerService {
         // Remove container
         await container.remove({ v: false }); // Don't auto-remove volumes, we'll do it explicitly
 
-        // Remove volumes if requested (Requirement 14.4)
+        // Remove Docker volumes if requested (Requirement 14.4)
         if (removeVolumes) {
           for (const volumeName of volumeNames) {
             try {
               const volume = this.docker.getVolume(volumeName);
               await volume.remove();
+              console.log(`Removed Docker volume: ${volumeName}`);
             } catch (error) {
               console.error(`Failed to remove volume ${volumeName}:`, this.getErrorMessage(error));
               // Continue with other volumes even if one fails
+            }
+          }
+
+          // Remove bind mount directories if requested (Requirement 14.4)
+          for (const bindMountPath of bindMountPaths) {
+            try {
+              if (fs.existsSync(bindMountPath)) {
+                // Use execSync to remove directory with proper permissions
+                execSync(`rm -rf "${bindMountPath}"`, { stdio: 'ignore' });
+                console.log(`Removed bind mount directory: ${bindMountPath}`);
+              }
+            } catch (error) {
+              console.error(`Failed to remove bind mount directory ${bindMountPath}:`, this.getErrorMessage(error));
+              // Continue with other directories even if one fails
             }
           }
         }
@@ -468,6 +484,23 @@ export class DockerService {
     }
 
     return volumeNames;
+  }
+
+  /**
+   * Extract bind mount paths from container info
+   */
+  private extractBindMountPaths(containerInfo: Docker.ContainerInspectInfo): string[] {
+    const bindMountPaths: string[] = [];
+    
+    if (containerInfo.Mounts) {
+      for (const mount of containerInfo.Mounts) {
+        if (mount.Type === 'bind' && mount.Source) {
+          bindMountPaths.push(mount.Source);
+        }
+      }
+    }
+
+    return bindMountPaths;
   }
 
   /**
