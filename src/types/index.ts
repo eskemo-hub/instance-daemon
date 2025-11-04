@@ -17,6 +17,7 @@ export interface ContainerConfig {
   volumePath?: string;
   isDatabase?: boolean; // Flag to indicate database container (uses TCP routing)
   publicAccess?: boolean; // Whether database should be added to HAProxy
+  isStackService?: boolean; // Flag to indicate container is part of a stack (uses internal networking)
 }
 
 export interface ContainerInfo {
