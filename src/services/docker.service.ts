@@ -127,6 +127,9 @@ export class DockerService {
           }
         };
 
+        // Apply resource limits if specified
+        this.applyResourceLimits(containerConfig.HostConfig, config);
+
         // Configure networking and TLS based on instance type
         if (config.useTraefik && config.domain && config.subdomain) {
           const fullDomain = `${config.subdomain}.${config.domain}`;
@@ -629,16 +632,36 @@ export class DockerService {
     try {
       const container = this.docker.getContainer(containerId);
       
+      // Get container info to check for configured limits
+      const containerInfo = await container.inspect();
+      
       // Get container stats (single snapshot)
       const stats = await container.stats({ stream: false });
       
-      // Calculate CPU percentage
-      const cpuPercent = this.calculateCpuPercent(stats);
+      // Calculate CPU percentage (pass container info to check for CPU limits)
+      const cpuPercent = this.calculateCpuPercent(stats, containerInfo);
       
-      // Memory metrics
+      // Memory metrics - use container's configured limit if set
       const memoryUsed = stats.memory_stats?.usage || 0;
-      const memoryLimit = stats.memory_stats?.limit || 0;
-      const memoryPercent = memoryLimit > 0 ? (memoryUsed / memoryLimit) * 100 : 0;
+      let memoryLimit = stats.memory_stats?.limit || 0;
+      let hasMemoryLimit = false;
+      
+      // Check if container has a memory limit configured
+      const configuredMemoryLimit = containerInfo.HostConfig?.Memory;
+      if (configuredMemoryLimit && configuredMemoryLimit > 0) {
+        memoryLimit = configuredMemoryLimit;
+        hasMemoryLimit = true;
+      } else {
+        // If no limit is set, memoryLimit from stats will be host's total memory
+        // Return 0 to indicate no limit (unlimited)
+        hasMemoryLimit = false;
+        memoryLimit = 0;
+      }
+      
+      // Calculate memory percent - only if limit is set
+      const memoryPercent = hasMemoryLimit && memoryLimit > 0 
+        ? (memoryUsed / memoryLimit) * 100 
+        : 0;
       
       // Network metrics
       let networkRx = 0;
@@ -738,9 +761,77 @@ export class DockerService {
   }
 
   /**
-   * Calculate CPU percentage from Docker stats
+   * Parse memory limit string (e.g., "512m", "1g", "2048") to bytes
    */
-  private calculateCpuPercent(stats: any): number {
+  private parseMemoryLimit(memoryLimit: string): number {
+    if (!memoryLimit) return 0;
+    
+    const match = memoryLimit.match(/^(\d+)([kmg]?)$/i);
+    if (!match) return 0;
+    
+    const value = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    
+    switch (unit) {
+      case 'g':
+        return value * 1024 * 1024 * 1024; // Convert GB to bytes
+      case 'm':
+        return value * 1024 * 1024; // Convert MB to bytes
+      case 'k':
+        return value * 1024; // Convert KB to bytes
+      default:
+        return value; // Assume bytes if no unit
+    }
+  }
+
+  /**
+   * Apply resource limits to container HostConfig
+   */
+  private applyResourceLimits(hostConfig: any, config: ContainerConfig): void {
+    // Apply CPU limit
+    if (config.cpuLimit !== undefined && config.cpuLimit > 0) {
+      // Docker uses CPU quota and period for CPU limits
+      // quota = cpuLimit * period (default period is 100000 microseconds)
+      // For example: 1 CPU = 100000, 0.5 CPU = 50000, 2 CPU = 200000
+      const cpuPeriod = 100000; // Default period in microseconds
+      const cpuQuota = Math.round(config.cpuLimit * cpuPeriod);
+      hostConfig.CpuQuota = cpuQuota;
+      hostConfig.CpuPeriod = cpuPeriod;
+      console.log(`[DOCKER] Applying CPU limit: ${config.cpuLimit} cores (quota: ${cpuQuota}, period: ${cpuPeriod})`);
+    }
+
+    // Apply memory limit
+    if (config.memoryLimit) {
+      const memoryBytes = this.parseMemoryLimit(config.memoryLimit);
+      if (memoryBytes > 0) {
+        hostConfig.Memory = memoryBytes;
+        console.log(`[DOCKER] Applying memory limit: ${config.memoryLimit} (${memoryBytes} bytes)`);
+      }
+    }
+
+    // Apply memory reservation (soft limit)
+    if (config.memoryReservation) {
+      const memoryReservationBytes = this.parseMemoryLimit(config.memoryReservation);
+      if (memoryReservationBytes > 0) {
+        hostConfig.MemoryReservation = memoryReservationBytes;
+        console.log(`[DOCKER] Applying memory reservation: ${config.memoryReservation} (${memoryReservationBytes} bytes)`);
+      }
+    }
+
+    // Note: Storage limits are not directly supported by Docker at the container level
+    // They would need to be enforced at the volume/filesystem level or through quotas
+    // We store it for monitoring/validation purposes but don't apply it here
+    if (config.storageLimit) {
+      console.log(`[DOCKER] Storage limit specified: ${config.storageLimit} (not applied at container level)`);
+    }
+  }
+
+  /**
+   * Calculate CPU percentage from Docker stats
+   * If container has CPU quota/period limits, calculate relative to that
+   * Otherwise, calculate as percentage of total system CPU
+   */
+  private calculateCpuPercent(stats: any, containerInfo?: any): number {
     const cpuStats = stats.cpu_stats;
     const preCpuStats = stats.precpu_stats;
     
@@ -751,6 +842,24 @@ export class DockerService {
     const onlineCpus = cpuStats.online_cpus || 1;
     
     if (systemDelta > 0 && cpuDelta > 0) {
+      // Check if container has CPU quota/period limits
+      if (containerInfo?.HostConfig?.CpuQuota && containerInfo?.HostConfig?.CpuPeriod) {
+        const cpuQuota = containerInfo.HostConfig.CpuQuota;
+        const cpuPeriod = containerInfo.HostConfig.CpuPeriod;
+        
+        // Calculate effective CPU cores from quota/period
+        // quota = -1 means no limit, otherwise quota/period = number of cores
+        if (cpuQuota > 0 && cpuPeriod > 0) {
+          const effectiveCores = cpuQuota / cpuPeriod;
+          // Calculate CPU usage relative to the quota
+          const cpuUsagePercent = (cpuDelta / systemDelta) * onlineCpus * 100;
+          // Return as percentage of allocated cores (can exceed 100% if using more than allocated)
+          return cpuUsagePercent;
+        }
+      }
+      
+      // No CPU quota set - calculate as percentage of total system CPU
+      // This shows how much of the server's total CPU this container is using
       return (cpuDelta / systemDelta) * onlineCpus * 100;
     }
     

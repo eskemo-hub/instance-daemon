@@ -54,6 +54,11 @@ export class ComposeStackService {
           composeData = this.addEnvironmentVariables(composeData, config.environment);
         }
         
+        // Add resource limits to services if provided
+        if (config.cpuLimit || config.memoryLimit || config.memoryReservation) {
+          composeData = this.addResourceLimits(composeData, config);
+        }
+        
         // Convert back to YAML
         composeContent = yaml.dump(composeData, { 
           lineWidth: -1,
@@ -309,6 +314,7 @@ export class ComposeStackService {
       lines?: number;
       follow?: boolean;
       service?: string;
+      container?: string;
     } = {}
   ): Promise<string[]> {
     try {
@@ -325,7 +331,10 @@ export class ComposeStackService {
         composeCommand += ` --tail ${options.lines}`;
       }
       
-      if (options.service) {
+      // Support both container name and service name
+      if (options.container) {
+        composeCommand += ` ${options.container}`;
+      } else if (options.service) {
         composeCommand += ` ${options.service}`;
       }
 
@@ -366,15 +375,31 @@ export class ComposeStackService {
       const services = await Promise.all(
         containers.map(async (container) => {
           try {
+            const containerInfo = await container.inspect();
             const stats = await container.stats({ stream: false });
             
             // Calculate CPU percentage
             const cpuPercent = this.calculateCpuPercent(stats);
             
-            // Memory metrics
+            // Memory metrics - use container's configured limit if set
             const memoryUsed = stats.memory_stats?.usage || 0;
-            const memoryLimit = stats.memory_stats?.limit || 0;
-            const memoryPercent = memoryLimit > 0 ? (memoryUsed / memoryLimit) * 100 : 0;
+            let memoryLimit = stats.memory_stats?.limit || 0;
+            let hasMemoryLimit = false;
+            
+            // Check if container has a memory limit configured
+            const configuredMemoryLimit = containerInfo.HostConfig?.Memory;
+            if (configuredMemoryLimit && configuredMemoryLimit > 0) {
+              memoryLimit = configuredMemoryLimit;
+              hasMemoryLimit = true;
+            } else {
+              // No limit set - return 0 to indicate unlimited
+              hasMemoryLimit = false;
+              memoryLimit = 0;
+            }
+            
+            const memoryPercent = hasMemoryLimit && memoryLimit > 0 
+              ? (memoryUsed / memoryLimit) * 100 
+              : 0;
             
             // Network metrics
             let networkRx = 0;
@@ -386,14 +411,13 @@ export class ComposeStackService {
               }
             }
 
-            const containerInfo = await container.inspect();
             const serviceName = containerInfo.Name.replace(/^\//, '').replace(/^.*_/, '');
 
             return {
               name: serviceName,
               cpuPercent,
               memoryUsed,
-              memoryLimit,
+              memoryLimit: hasMemoryLimit ? memoryLimit : 0, // Return 0 if no limit
               memoryPercent,
               networkRx,
               networkTx
@@ -439,6 +463,43 @@ export class ComposeStackService {
       return stackContainers;
     } catch (error) {
       throw new Error(`Failed to list stack containers: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Get container information for a stack
+   * Returns list of containers with their names, IDs, and status
+   */
+  async getStackContainersInfo(stackName: string): Promise<Array<{
+    id: string;
+    name: string;
+    status: string;
+    service?: string;
+  }>> {
+    try {
+      const containers = await this.docker.listContainers({ all: true });
+      const stackContainers = containers
+        .filter(container => {
+          const containerName = container.Names[0]?.replace(/^\//, '') || '';
+          return containerName.startsWith(`${stackName}_`);
+        })
+        .map(container => {
+          const containerName = container.Names[0]?.replace(/^\//, '') || '';
+          // Extract service name from container name (format: {project}_{service}_{number})
+          const parts = containerName.split('_');
+          const service = parts.length > 1 ? parts.slice(1, -1).join('_') : undefined;
+          
+          return {
+            id: container.Id,
+            name: containerName,
+            status: container.State || 'unknown',
+            service
+          };
+        });
+
+      return stackContainers;
+    } catch (error) {
+      throw new Error(`Failed to get stack containers info: ${this.getErrorMessage(error)}`);
     }
   }
 
@@ -648,6 +709,90 @@ export class ComposeStackService {
         ...service.environment,
         ...envVars
       };
+    }
+
+    return composeData;
+  }
+
+  /**
+   * Parse memory limit string (e.g., "512m", "1g", "2048") to bytes
+   */
+  private parseMemoryLimit(memoryLimit: string): number {
+    if (!memoryLimit) return 0;
+    
+    const match = memoryLimit.match(/^(\d+)([kmg]?)$/i);
+    if (!match) return 0;
+    
+    const value = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    
+    switch (unit) {
+      case 'g':
+        return value * 1024 * 1024 * 1024; // Convert GB to bytes
+      case 'm':
+        return value * 1024 * 1024; // Convert MB to bytes
+      case 'k':
+        return value * 1024; // Convert KB to bytes
+      default:
+        return value; // Assume bytes if no unit
+    }
+  }
+
+  /**
+   * Add resource limits to services in compose file
+   */
+  private addResourceLimits(composeData: any, config: ComposeStackConfig): any {
+    if (!composeData.services) {
+      return composeData;
+    }
+
+    // Add resource limits to each service
+    for (const [serviceName, serviceConfig] of Object.entries(composeData.services)) {
+      const service = serviceConfig as any;
+      
+      // Initialize deploy section if not present
+      if (!service.deploy) {
+        service.deploy = {};
+      }
+      
+      // Initialize resources if not present
+      if (!service.deploy.resources) {
+        service.deploy.resources = {};
+      }
+      
+      // Initialize limits if not present
+      if (!service.deploy.resources.limits) {
+        service.deploy.resources.limits = {};
+      }
+      
+      // Initialize reservations if not present
+      if (!service.deploy.resources.reservations) {
+        service.deploy.resources.reservations = {};
+      }
+
+      // Apply CPU limit
+      if (config.cpuLimit !== undefined && config.cpuLimit > 0) {
+        service.deploy.resources.limits.cpus = `${config.cpuLimit}`;
+        console.log(`[COMPOSE] Applying CPU limit to ${serviceName}: ${config.cpuLimit} cores`);
+      }
+
+      // Apply memory limit
+      if (config.memoryLimit) {
+        service.deploy.resources.limits.memory = config.memoryLimit;
+        console.log(`[COMPOSE] Applying memory limit to ${serviceName}: ${config.memoryLimit}`);
+      }
+
+      // Apply memory reservation (soft limit)
+      if (config.memoryReservation) {
+        service.deploy.resources.reservations.memory = config.memoryReservation;
+        console.log(`[COMPOSE] Applying memory reservation to ${serviceName}: ${config.memoryReservation}`);
+      }
+
+      // Note: Storage limits are not directly supported in Docker Compose
+      // They would need to be enforced at the volume/filesystem level
+      if (config.storageLimit) {
+        console.log(`[COMPOSE] Storage limit specified: ${config.storageLimit} (not applied at compose level)`);
+      }
     }
 
     return composeData;

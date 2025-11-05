@@ -170,6 +170,7 @@ composeRoutes.get('/:stackName/logs', async (req: Request, res: Response, next: 
     const lines = req.query.lines ? parseInt(req.query.lines as string, 10) : undefined;
     const follow = req.query.follow === 'true';
     const service = req.query.service as string | undefined;
+    const container = req.query.container as string | undefined;
 
     if (!stackName) {
       throw new ValidationError('Missing required parameter: stackName');
@@ -178,7 +179,8 @@ composeRoutes.get('/:stackName/logs', async (req: Request, res: Response, next: 
     const logs = await composeStackService.getStackLogs(stackName, {
       lines,
       follow,
-      service
+      service,
+      container
     });
     
     return res.json({
@@ -256,6 +258,29 @@ composeRoutes.post('/:stackName/services/:serviceName/restart', async (req: Requ
     return res.json({
       success: true,
       message: `Service ${serviceName} in stack ${stackName} restarted successfully`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/compose/:stackName/containers
+ * Get list of containers in a stack
+ */
+composeRoutes.get('/:stackName/containers', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { stackName } = req.params;
+
+    if (!stackName) {
+      throw new ValidationError('Missing required parameter: stackName');
+    }
+
+    const containers = await composeStackService.getStackContainersInfo(stackName);
+    
+    return res.json({
+      success: true,
+      data: containers
     });
   } catch (error) {
     next(error);

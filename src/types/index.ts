@@ -18,6 +18,11 @@ export interface ContainerConfig {
   isDatabase?: boolean; // Flag to indicate database container (uses TCP routing)
   publicAccess?: boolean; // Whether database should be added to HAProxy
   isStackService?: boolean; // Flag to indicate container is part of a stack (uses internal networking)
+  // Resource limits
+  cpuLimit?: number; // CPU cores (e.g., 0.5, 1, 2)
+  memoryLimit?: string; // Memory limit (e.g., "512m", "1g", "2g")
+  memoryReservation?: string; // Memory reservation/soft limit (e.g., "256m", "512m")
+  storageLimit?: string; // Storage limit (e.g., "10g", "50g") - Note: Docker doesn't directly support this, but can be used for monitoring
 }
 
 export interface ContainerInfo {
@@ -61,6 +66,11 @@ export interface ComposeStackConfig {
   subdomain?: string;
   publicAccess?: boolean;
   port: number;
+  // Resource limits (applied to main service or all services)
+  cpuLimit?: number;
+  memoryLimit?: string;
+  memoryReservation?: string;
+  storageLimit?: string;
 }
 
 export interface ComposeStackInfo {

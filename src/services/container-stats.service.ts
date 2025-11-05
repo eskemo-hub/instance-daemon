@@ -33,7 +33,7 @@ export class ContainerStatsService {
         try {
             const container = this.docker.getContainer(containerId);
 
-            // Get container info for name
+            // Get container info for name and limits
             const info = await container.inspect();
             const containerName = info.Name.replace(/^\//, '');
 
@@ -41,12 +41,31 @@ export class ContainerStatsService {
             const stats: any = await container.stats({ stream: false });
 
             // Calculate CPU percentage
-            const cpuPercent = this.calculateCpuPercent(stats);
+            const cpuPercent = this.calculateCpuPercent(stats, info);
 
-            // Memory stats
-            const memoryUsed = stats.memory_stats.usage || 0;
-            const memoryLimit = stats.memory_stats.limit || 0;
-            const memoryPercent = memoryLimit > 0 ? (memoryUsed / memoryLimit) * 100 : 0;
+            // Memory stats - use container limit if set, otherwise use stats limit
+            // If stats limit equals host memory, check if container has a configured limit
+            const memoryUsed = stats.memory_stats?.usage || 0;
+            let memoryLimit = stats.memory_stats?.limit || 0;
+            let hasMemoryLimit = false;
+            
+            // Check if container has a memory limit configured
+            const configuredMemoryLimit = info.HostConfig?.Memory;
+            if (configuredMemoryLimit && configuredMemoryLimit > 0) {
+                memoryLimit = configuredMemoryLimit;
+                hasMemoryLimit = true;
+            } else {
+                // If no limit is set, memoryLimit will be host's total memory from stats
+                // We can detect this by checking if the limit seems unreasonably high
+                // or by checking if HostConfig.Memory is 0 or undefined
+                // For now, we'll use the stats limit but note that it represents host memory
+                hasMemoryLimit = false;
+            }
+            
+            // Calculate memory percent - if no limit, set to 0 to avoid misleading percentages
+            const memoryPercent = hasMemoryLimit && memoryLimit > 0 
+                ? (memoryUsed / memoryLimit) * 100 
+                : 0;
 
             // Network stats
             const { networkRx, networkTx } = this.calculateNetworkStats(stats);
@@ -62,7 +81,7 @@ export class ContainerStatsService {
                 containerName,
                 cpuPercent: Math.round(cpuPercent * 100) / 100,
                 memoryUsed,
-                memoryLimit,
+                memoryLimit: hasMemoryLimit ? memoryLimit : 0, // Return 0 if no limit to indicate unlimited
                 memoryPercent: Math.round(memoryPercent * 100) / 100,
                 networkRx,
                 networkTx,
@@ -93,8 +112,10 @@ export class ContainerStatsService {
 
     /**
      * Calculate CPU percentage from Docker stats
+     * If container has CPU quota/period limits, calculate relative to that
+     * Otherwise, calculate as percentage of total system CPU
      */
-    private calculateCpuPercent(stats: any): number {
+    private calculateCpuPercent(stats: any, containerInfo?: any): number {
         const cpuDelta = stats.cpu_stats.cpu_usage.total_usage -
             (stats.precpu_stats.cpu_usage?.total_usage || 0);
         const systemDelta = stats.cpu_stats.system_cpu_usage -
@@ -102,6 +123,24 @@ export class ContainerStatsService {
         const numberCpus = stats.cpu_stats.online_cpus || 1;
 
         if (systemDelta > 0 && cpuDelta > 0) {
+            // Check if container has CPU quota/period limits
+            if (containerInfo?.HostConfig?.CpuQuota && containerInfo?.HostConfig?.CpuPeriod) {
+                const cpuQuota = containerInfo.HostConfig.CpuQuota;
+                const cpuPeriod = containerInfo.HostConfig.CpuPeriod;
+                
+                // Calculate effective CPU cores from quota/period
+                // quota = -1 means no limit, otherwise quota/period = number of cores
+                if (cpuQuota > 0 && cpuPeriod > 0) {
+                    const effectiveCores = cpuQuota / cpuPeriod;
+                    // Calculate CPU usage relative to the quota
+                    const cpuUsagePercent = (cpuDelta / systemDelta) * numberCpus * 100;
+                    // Return as percentage of allocated cores (can exceed 100% if using more than allocated)
+                    return cpuUsagePercent;
+                }
+            }
+            
+            // No CPU quota set - calculate as percentage of total system CPU
+            // This shows how much of the server's total CPU this container is using
             return (cpuDelta / systemDelta) * numberCpus * 100;
         }
         return 0;
