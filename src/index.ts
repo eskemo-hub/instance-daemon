@@ -8,6 +8,7 @@ import backupRoutes from './routes/backup.routes';
 import statsRoutes from './routes/stats.routes';
 import apiKeyRoutes from './routes/api-key.routes';
 import logsRoutes from './routes/logs.routes';
+import composeRoutes from './routes/compose.routes';
 import updateRoutes from './routes/update.routes';
 import certificateRoutes from './routes/certificates';
 import { authMiddleware } from './middleware/auth.middleware';
@@ -42,6 +43,7 @@ app.use('/api/backup', authMiddleware, backupRoutes);
 app.use('/api/stats', authMiddleware, statsRoutes);
 app.use('/api/api-keys', authMiddleware, apiKeyRoutes);
 app.use('/api/logs', authMiddleware, logsRoutes);
+app.use('/api/compose', authMiddleware, composeRoutes);
 app.use('/api/update', authMiddleware, updateRoutes);
 app.use('/api/certificates', authMiddleware, certificateRoutes);
 

@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import { apiSuccess, apiError } from '../utils/api-response';
 import { ContainerLogsService } from '../services/container-logs.service';
+import Docker from 'dockerode';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -103,3 +104,93 @@ router.post('/container', async (req: Request, res: Response) => {
 });
 
 export default router;
+
+/**
+ * GET /api/logs/stream
+ * Server-Sent Events: stream daemon journal or container logs
+ */
+router.get('/stream', async (req: Request, res: Response) => {
+  const source = (req.query.source as 'journal' | 'container') || 'journal';
+  const containerId = req.query.containerId as string | undefined;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  // No need to flush headers explicitly; SSE works with default headers
+
+  const send = (line: string): void => {
+    const msg = line.replace(/\r/g, '').trim();
+    if (msg.length > 0) {
+      res.write(`data: ${msg}\n\n`);
+    }
+  };
+
+  const end = (): void => {
+    try { res.end(); } catch {}
+  };
+
+  req.on('close', end);
+
+  try {
+    if (source === 'journal') {
+      const journal = spawn('journalctl', ['-u', 'n8n-daemon', '-f', '--no-pager', '-o', 'cat']);
+
+      journal.stdout.on('data', (chunk: Buffer) => {
+        send(chunk.toString('utf8'));
+      });
+      journal.stderr.on('data', (chunk: Buffer) => {
+        send(chunk.toString('utf8'));
+      });
+      journal.on('close', end);
+
+      req.on('close', () => {
+        try { journal.kill('SIGTERM'); } catch {}
+      });
+    } else {
+      if (!containerId) {
+        send('Container ID is required for container log streaming');
+        return end();
+      }
+
+      const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+      const container = docker.getContainer(containerId);
+
+      // Decode Docker multiplexed log frames into plain text lines
+      const decodeFrames = (buffer: Buffer): string[] => {
+        const lines: string[] = [];
+        let offset = 0;
+        while (offset + 8 <= buffer.length) {
+          const payloadSize = buffer.readUInt32BE(offset + 4);
+          if (offset + 8 + payloadSize > buffer.length) break;
+          const frame = buffer.slice(offset + 8, offset + 8 + payloadSize).toString('utf8');
+          if (frame.trim().length > 0) {
+            lines.push(frame);
+          }
+          offset += 8 + payloadSize;
+        }
+        return lines;
+      };
+
+      container.logs({ stdout: true, stderr: true, follow: true, timestamps: true }, (err: unknown, stream: NodeJS.ReadableStream | undefined) => {
+        if (err || !stream) {
+          send('Failed to stream container logs');
+          return end();
+        }
+
+        stream.on('data', (chunk: Buffer) => {
+          const lines = decodeFrames(chunk);
+          for (const line of lines) send(line);
+        });
+        stream.on('end', end);
+        stream.on('error', end);
+
+        req.on('close', () => {
+          try { /* best-effort cleanup */ stream.removeAllListeners(); } catch {}
+        });
+      });
+    }
+  } catch (error) {
+    send(error instanceof Error ? error.message : 'Failed to start log stream');
+    end();
+  }
+});
