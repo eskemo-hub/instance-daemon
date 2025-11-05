@@ -950,10 +950,26 @@ export class DockerService {
         console.log(`[DOCKER] Removed volume: ${volumeName}`);
       } catch (error) {
         const errorMessage = this.getErrorMessage(error);
-        // Check if volume is in use
-        if (errorMessage.includes('in use') || errorMessage.includes('is being used')) {
-          throw new Error(`Volume ${volumeName} is in use and cannot be removed`);
+        
+        // Check for specific Docker error scenarios and provide detailed messages
+        if (errorMessage.includes('in use') || 
+            errorMessage.includes('is being used') ||
+            errorMessage.includes('is currently in use')) {
+          throw new Error(`Volume ${volumeName} is in use by a container and cannot be removed. Stop the container first.`);
         }
+        
+        if (errorMessage.includes('no such volume') || 
+            errorMessage.includes('not found') ||
+            errorMessage.includes('No such volume')) {
+          throw new Error(`Volume ${volumeName} not found. It may have already been removed.`);
+        }
+        
+        if (errorMessage.includes('permission denied') || 
+            errorMessage.includes('Permission denied')) {
+          throw new Error(`Permission denied when trying to remove volume ${volumeName}. Check Docker permissions.`);
+        }
+        
+        // For other errors, include the full error message
         throw new Error(`Failed to remove volume ${volumeName}: ${errorMessage}`);
       }
     });

@@ -73,10 +73,23 @@ export const errorHandler = (
     statusCode = 404;
     err.name = 'NotFoundError';
     err.message = 'Container not found';
+  } else if (err.message.includes('no such volume') || 
+             (err.message.includes('Volume') && err.message.includes('not found'))) {
+    statusCode = 404;
+    err.name = 'NotFoundError';
+    // Keep the detailed message from the service
+  } else if (err.message.includes('in use') && err.message.includes('Volume')) {
+    statusCode = 409;
+    err.name = 'ConflictError';
+    // Keep the detailed message from the service
   } else if (err.message.includes('port is already allocated')) {
     statusCode = 409;
     err.name = 'ConflictError';
     err.message = 'Port is already in use';
+  } else if (err.message.includes('Permission denied')) {
+    statusCode = 403;
+    err.name = 'ForbiddenError';
+    // Keep the detailed message from the service
   } else if (err.message.includes('Cannot connect to the Docker daemon')) {
     statusCode = 503;
     err.name = 'ServiceUnavailableError';
@@ -89,6 +102,11 @@ export const errorHandler = (
     message: err.message || 'Internal server error',
     statusCode,
   };
+  
+  // Ensure we always have a meaningful error name
+  if (!errorResponse.error || errorResponse.error === 'Error') {
+    errorResponse.error = err.constructor.name || 'Error';
+  }
 
   // Include stack trace in development
   if (process.env.NODE_ENV === 'development' && err.stack) {

@@ -375,16 +375,52 @@ export class ComposeStackService {
         throw new Error(`Compose stack not found: ${stackName}`);
       }
 
+      // If a specific container is requested, use docker logs directly
+      if (options.container) {
+        try {
+          // Try to find the container by name (full container name from getStackContainersInfo)
+          const containers = await this.docker.listContainers({ all: true });
+          const container = containers.find(c => {
+            const containerName = c.Names[0]?.replace(/^\//, '') || '';
+            // Match exact container name
+            return containerName === options.container;
+          });
+
+          if (container) {
+            const dockerContainer = this.docker.getContainer(container.Id);
+            const logs = await dockerContainer.logs({
+              stdout: true,
+              stderr: true,
+              tail: options.lines || 100,
+              timestamps: true
+            });
+            
+            // Format logs with container name prefix to match compose format
+            const containerName = container.Names[0]?.replace(/^\//, '') || options.container;
+            const logLines = logs.toString().split('\n')
+              .filter(line => line.trim().length > 0)
+              .map(line => {
+                // Docker logs include 8-byte header, remove it if present
+                const cleanLine = line.replace(/^[\x00-\x08]/, '');
+                // Add container name prefix to match compose format
+                return `${containerName}  | ${cleanLine}`;
+              });
+            return logLines;
+          }
+        } catch (containerError) {
+          // If container-specific logging fails, fall through to compose logs
+          console.warn(`[COMPOSE] Failed to get logs for container ${options.container}, falling back to compose logs: ${this.getErrorMessage(containerError)}`);
+        }
+      }
+
+      // Use docker compose logs for service-level or all logs
       let composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" logs`;
       
       if (options.lines) {
         composeCommand += ` --tail ${options.lines}`;
       }
       
-      // Support both container name and service name
-      if (options.container) {
-        composeCommand += ` ${options.container}`;
-      } else if (options.service) {
+      if (options.service) {
         composeCommand += ` ${options.service}`;
       }
 
