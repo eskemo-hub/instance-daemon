@@ -257,6 +257,15 @@ if [ -z "$NPM_BIN" ]; then
   fi
 fi
 
+# Fix npm cache ownership if it exists (fixes EACCES errors from root-owned cache files)
+if [ -d "/opt/n8n-daemon/.npm" ]; then
+  echo -e "${GREEN}Fixing npm cache ownership...${NC}"
+  chown -R n8n-daemon:n8n-daemon /opt/n8n-daemon/.npm
+fi
+
+# Ensure entire /opt/n8n-daemon directory is owned by n8n-daemon user
+chown -R n8n-daemon:n8n-daemon /opt/n8n-daemon
+
 su -s /bin/bash n8n-daemon -c "$NPM_BIN install"
 su -s /bin/bash n8n-daemon -c "$NPM_BIN run build"
 

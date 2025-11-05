@@ -238,8 +238,10 @@ export class ComposeStackService {
               ready: isHealthy
             };
           } catch (error) {
+            // Fallback: use container ID if inspect fails
+            const containerId = container.id || 'unknown';
             return {
-              name: container.Names[0]?.replace(/^\//, '') || 'unknown',
+              name: containerId.substring(0, 12), // Use short container ID
               status: 'error' as 'running' | 'stopped' | 'error',
               ready: false
             };
