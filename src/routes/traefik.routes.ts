@@ -136,3 +136,27 @@ traefikRoutes.get('/dashboard', async (_req: Request, res: Response, next: NextF
     next(error);
   }
 });
+
+/**
+ * POST /api/traefik/dashboard
+ * Enable or disable Traefik dashboard
+ * Body: { enabled: boolean }
+ */
+traefikRoutes.post('/dashboard', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { enabled } = req.body;
+
+    if (typeof enabled !== 'boolean') {
+      throw new ValidationError('enabled must be a boolean');
+    }
+
+    await traefikService.setDashboardEnabled(enabled);
+    
+    res.status(200).json({
+      success: true,
+      message: `Dashboard ${enabled ? 'enabled' : 'disabled'} successfully`
+    });
+  } catch (error) {
+    next(error);
+  }
+});

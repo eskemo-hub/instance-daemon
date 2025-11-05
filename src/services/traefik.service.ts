@@ -35,8 +35,9 @@ export class TraefikService {
    * @param email - Email for Let's Encrypt notifications
    * @param domain - Base domain for Traefik dashboard
    * @param cloudflareApiToken - Optional Cloudflare API token for DNS-01 challenge
+   * @param dashboardEnabled - Whether to enable dashboard routing (default: true)
    */
-  async installTraefik(email: string, domain: string, cloudflareApiToken?: string): Promise<void> {
+  async installTraefik(email: string, domain: string, cloudflareApiToken?: string, dashboardEnabled: boolean = true): Promise<void> {
     try {
       // Create Traefik network if it doesn't exist
       await this.createTraefikNetwork();
@@ -45,7 +46,7 @@ export class TraefikService {
       await this.pullTraefikImage();
 
       // Create Traefik container
-      await this.createTraefikContainer(email, domain, cloudflareApiToken);
+      await this.createTraefikContainer(email, domain, cloudflareApiToken, dashboardEnabled);
 
       const challengeType = cloudflareApiToken ? 'DNS-01 (Cloudflare)' : 'HTTP-01';
       console.log(`Traefik installed and started successfully with ${challengeType} challenge`);
@@ -104,8 +105,12 @@ export class TraefikService {
 
   /**
    * Create Traefik container
+   * @param email - Email for Let's Encrypt notifications
+   * @param domain - Base domain for Traefik dashboard
+   * @param cloudflareApiToken - Optional Cloudflare API token for DNS-01 challenge
+   * @param dashboardEnabled - Whether to enable dashboard routing (default: true)
    */
-  private async createTraefikContainer(email: string, domain: string, cloudflareApiToken?: string): Promise<void> {
+  private async createTraefikContainer(email: string, domain: string, cloudflareApiToken?: string, dashboardEnabled: boolean = true): Promise<void> {
     try {
       // Build command arguments based on challenge type
       const cmdArgs = [
@@ -150,6 +155,18 @@ export class TraefikService {
         env.push(`CF_API_TOKEN=${cloudflareApiToken}`);
       }
 
+      // Build labels - only add dashboard routing if enabled
+      const labels: Record<string, string> = {
+        'traefik.enable': 'true',
+      };
+
+      if (dashboardEnabled) {
+        labels['traefik.http.routers.traefik.rule'] = `Host(\`traefik.${domain}\`)`;
+        labels['traefik.http.routers.traefik.service'] = 'api@internal';
+        labels['traefik.http.routers.traefik.entrypoints'] = 'websecure';
+        labels['traefik.http.routers.traefik.tls.certresolver'] = 'letsencrypt';
+      }
+
       const container = await this.docker.createContainer({
         Image: 'traefik:v2.10',
         name: this.TRAEFIK_CONTAINER_NAME,
@@ -174,13 +191,7 @@ export class TraefikService {
             Name: 'unless-stopped',
           },
         },
-        Labels: {
-          'traefik.enable': 'true',
-          'traefik.http.routers.traefik.rule': `Host(\`traefik.${domain}\`)`,
-          'traefik.http.routers.traefik.service': 'api@internal',
-          'traefik.http.routers.traefik.entrypoints': 'websecure',
-          'traefik.http.routers.traefik.tls.certresolver': 'letsencrypt',
-        },
+        Labels: labels,
       });
 
       // Connect to Traefik network
@@ -312,6 +323,76 @@ export class TraefikService {
   }
 
   /**
+   * Get current Traefik configuration (email, domain, cloudflare token)
+   * Used when recreating container to enable/disable dashboard
+   */
+  async getTraefikConfigForRecreate(): Promise<{ email?: string; domain?: string; cloudflareApiToken?: string }> {
+    try {
+      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const info = await container.inspect();
+      
+      // Extract email from command args
+      const cmdArgs = info.Config.Cmd || [];
+      const emailMatch = cmdArgs.find(arg => arg.includes('certificatesresolvers.letsencrypt.acme.email='));
+      const email = emailMatch ? emailMatch.split('=')[1] : undefined;
+      
+      // Extract domain from labels
+      const labels = info.Config.Labels || {};
+      const routerRule = labels['traefik.http.routers.traefik.rule'] || '';
+      let domainMatch = routerRule.match(/Host\(`traefik\.(.+?)`\)/);
+      if (!domainMatch) {
+        domainMatch = routerRule.match(/Host\(\\`traefik\.(.+?)\\`\)/);
+      }
+      if (!domainMatch) {
+        domainMatch = routerRule.match(/traefik\.(.+?)(?:`|\))/);
+      }
+      const domain = domainMatch ? domainMatch[1] : undefined;
+      
+      // Extract Cloudflare token from environment
+      const env = info.Config.Env || [];
+      const cfTokenMatch = env.find(e => e.startsWith('CF_API_TOKEN='));
+      const cloudflareApiToken = cfTokenMatch ? cfTokenMatch.split('=')[1] : undefined;
+      
+      return { email, domain, cloudflareApiToken };
+    } catch (error) {
+      if (this.getErrorMessage(error).includes('no such container')) {
+        throw new Error('Traefik is not installed');
+      }
+      throw new Error(`Failed to get Traefik config: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Enable or disable Traefik dashboard
+   * This recreates the container with the appropriate configuration
+   */
+  async setDashboardEnabled(enabled: boolean): Promise<void> {
+    try {
+      // Get current configuration
+      const config = await this.getTraefikConfigForRecreate();
+      
+      if (!config.email || !config.domain) {
+        throw new Error('Cannot toggle dashboard: missing email or domain configuration');
+      }
+
+      // Stop and remove existing container
+      await this.uninstallTraefik();
+
+      // Recreate with new dashboard setting
+      await this.installTraefik(
+        config.email,
+        config.domain,
+        config.cloudflareApiToken,
+        enabled
+      );
+
+      console.log(`Traefik dashboard ${enabled ? 'enabled' : 'disabled'}`);
+    } catch (error) {
+      throw new Error(`Failed to ${enabled ? 'enable' : 'disable'} dashboard: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
    * Get Traefik dashboard information
    */
   async getDashboardInfo(): Promise<{ enabled: boolean; url?: string; domain?: string }> {
@@ -326,7 +407,17 @@ export class TraefikService {
       // Extract domain from labels
       const labels = info.Config.Labels || {};
       const routerRule = labels['traefik.http.routers.traefik.rule'] || '';
-      const domainMatch = routerRule.match(/Host\(`traefik\.(.+)`\)/);
+      // Try multiple regex patterns to match the domain
+      // Pattern 1: Host(`traefik.domain.com`)
+      let domainMatch = routerRule.match(/Host\(`traefik\.(.+?)`\)/);
+      // Pattern 2: Host(`traefik.domain.com`) (with escaped backticks)
+      if (!domainMatch) {
+        domainMatch = routerRule.match(/Host\(\\`traefik\.(.+?)\\`\)/);
+      }
+      // Pattern 3: Just extract anything after traefik.
+      if (!domainMatch) {
+        domainMatch = routerRule.match(/traefik\.(.+?)(?:`|\))/);
+      }
       const domain = domainMatch ? domainMatch[1] : undefined;
       
       return {
