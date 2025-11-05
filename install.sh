@@ -121,37 +121,40 @@ else
 fi
 
 # Optional: Install and configure HAProxy for database proxying
-if prompt_yes_no "Install and configure HAProxy for database proxying?"; then
-  echo -e "${GREEN}Installing HAProxy...${NC}"
-  apt install -y haproxy
+if command -v haproxy >/dev/null 2>&1; then
+  echo -e "${GREEN}HAProxy is already installed. Skipping installation and config prompt.${NC}"
+else
+  if prompt_yes_no "Install and configure HAProxy for database proxying?"; then
+    echo -e "${GREEN}Installing HAProxy...${NC}"
+    apt install -y haproxy
 
-  # Offer to generate a minimal TCP pass-through config
-  if prompt_yes_no "Generate HAProxy config for database proxying now?"; then
-    read -p "Database type (postgres/mysql) [postgres]: " DB_TYPE
-    DB_TYPE=${DB_TYPE:-postgres}
-    if [ "$DB_TYPE" = "mysql" ]; then DEFAULT_PORT=3306; else DEFAULT_PORT=5432; fi
+    # Offer to generate a minimal TCP pass-through config
+    if prompt_yes_no "Generate HAProxy config for database proxying now?"; then
+      read -p "Database type (postgres/mysql) [postgres]: " DB_TYPE
+      DB_TYPE=${DB_TYPE:-postgres}
+      if [ "$DB_TYPE" = "mysql" ]; then DEFAULT_PORT=3306; else DEFAULT_PORT=5432; fi
 
-    read -p "Frontend bind address [0.0.0.0]: " BIND_ADDR
-    BIND_ADDR=${BIND_ADDR:-0.0.0.0}
-    read -p "Frontend port [${DEFAULT_PORT}]: " FRONT_PORT
-    FRONT_PORT=${FRONT_PORT:-$DEFAULT_PORT}
-    read -p "Allowed CIDR (e.g., 10.0.0.0/8, leave blank to allow all): " ALLOWED_CIDR
-    read -p "Backend servers (comma-separated host:port): " BACKENDS
+      read -p "Frontend bind address [0.0.0.0]: " BIND_ADDR
+      BIND_ADDR=${BIND_ADDR:-0.0.0.0}
+      read -p "Frontend port [${DEFAULT_PORT}]: " FRONT_PORT
+      FRONT_PORT=${FRONT_PORT:-$DEFAULT_PORT}
+      read -p "Allowed CIDR (e.g., 10.0.0.0/8, leave blank to allow all): " ALLOWED_CIDR
+      read -p "Backend servers (comma-separated host:port): " BACKENDS
 
-    IFS=',' read -ra ADDR <<< "$BACKENDS"
-    BACKEND_LINES=""
-    for s in "${ADDR[@]}"; do
-      s_trim=$(echo "$s" | xargs)
-      if [ -n "$s_trim" ]; then
-        BACKEND_LINES="${BACKEND_LINES}    server $(echo "$s_trim" | sed 's/[^A-Za-z0-9]/_/g') $s_trim check inter 2s rise 3 fall 3 maxconn 200\n"
-      fi
-    done
+      IFS=',' read -ra ADDR <<< "$BACKENDS"
+      BACKEND_LINES=""
+      for s in "${ADDR[@]}"; do
+        s_trim=$(echo "$s" | xargs)
+        if [ -n "$s_trim" ]; then
+          BACKEND_LINES="${BACKEND_LINES}    server $(echo "$s_trim" | sed 's/[^A-Za-z0-9]/_/g') $s_trim check inter 2s rise 3 fall 3 maxconn 200\n"
+        fi
+      done
 
-    if [ -z "$BACKEND_LINES" ]; then
-      echo -e "${YELLOW}No backend servers provided. Skipping HAProxy config generation.${NC}"
-    else
-      echo -e "${GREEN}Writing HAProxy config to /etc/haproxy/haproxy.cfg...${NC}"
-      cat >/etc/haproxy/haproxy.cfg <<EOF
+      if [ -z "$BACKEND_LINES" ]; then
+        echo -e "${YELLOW}No backend servers provided. Skipping HAProxy config generation.${NC}"
+      else
+        echo -e "${GREEN}Writing HAProxy config to /etc/haproxy/haproxy.cfg...${NC}"
+        cat >/etc/haproxy/haproxy.cfg <<EOF
 global
   log /dev/log local0
   log /dev/log local1 notice
@@ -171,28 +174,29 @@ frontend db_frontend
   bind ${BIND_ADDR}:${FRONT_PORT}
   default_backend db_backends
 EOF
-      if [ -n "$ALLOWED_CIDR" ]; then
-        echo "  acl allowed_net src ${ALLOWED_CIDR}" >> /etc/haproxy/haproxy.cfg
-        echo "  tcp-request connection reject if !allowed_net" >> /etc/haproxy/haproxy.cfg
-      fi
-      cat >>/etc/haproxy/haproxy.cfg <<EOF
+        if [ -n "$ALLOWED_CIDR" ]; then
+          echo "  acl allowed_net src ${ALLOWED_CIDR}" >> /etc/haproxy/haproxy.cfg
+          echo "  tcp-request connection reject if !allowed_net" >> /etc/haproxy/haproxy.cfg
+        fi
+        cat >>/etc/haproxy/haproxy.cfg <<EOF
 
 backend db_backends
   balance roundrobin
   option tcp-check
 $(echo -e "$BACKEND_LINES")
 EOF
-
-      if haproxy -c -f /etc/haproxy/haproxy.cfg; then
-        systemctl enable haproxy
-        systemctl restart haproxy
-        echo -e "${GREEN}HAProxy configured and restarted on ${BIND_ADDR}:${FRONT_PORT}.${NC}"
-      else
-        echo -e "${RED}HAProxy config validation failed. File left in /etc/haproxy/haproxy.cfg.${NC}"
+        
+        if haproxy -c -f /etc/haproxy/haproxy.cfg; then
+          systemctl enable haproxy
+          systemctl restart haproxy
+          echo -e "${GREEN}HAProxy configured and restarted on ${BIND_ADDR}:${FRONT_PORT}.${NC}"
+        else
+          echo -e "${RED}HAProxy config validation failed. File left in /etc/haproxy/haproxy.cfg.${NC}"
+        fi
       fi
+    else
+      echo -e "${YELLOW}Skipping HAProxy config generation. You can edit /etc/haproxy/haproxy.cfg later.${NC}"
     fi
-  else
-    echo -e "${YELLOW}Skipping HAProxy config generation. You can edit /etc/haproxy/haproxy.cfg later.${NC}"
   fi
 fi
 
@@ -222,6 +226,8 @@ if [ ! -d "$REPO_DIR" ]; then
   fi
 else
   echo -e "${GREEN}Repository already cloned at $REPO_DIR.${NC}"
+  echo -e "${GREEN}Fixing repository ownership for n8n-daemon user...${NC}"
+  chown -R n8n-daemon:n8n-daemon "$REPO_DIR"
   echo -e "${GREEN}Pulling latest changes...${NC}"
   # Pull latest code as daemon user; fast-forward only to avoid unintended merges
   if ! su -s /bin/bash n8n-daemon -c "git -C $REPO_DIR pull --ff-only"; then
