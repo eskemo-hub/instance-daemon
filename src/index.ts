@@ -11,6 +11,7 @@ import logsRoutes from './routes/logs.routes';
 import composeRoutes from './routes/compose.routes';
 import updateRoutes from './routes/update.routes';
 import certificateRoutes from './routes/certificates';
+import { cleanupRoutes } from './routes/cleanup.routes';
 import { authMiddleware } from './middleware/auth.middleware';
 import { errorHandler } from './middleware/error.middleware';
 import { validateEnvironmentOrThrow } from './utils/env-validation';
@@ -46,6 +47,7 @@ app.use('/api/logs', authMiddleware, logsRoutes);
 app.use('/api/compose', authMiddleware, composeRoutes);
 app.use('/api/update', authMiddleware, updateRoutes);
 app.use('/api/certificates', authMiddleware, certificateRoutes);
+app.use('/api/cleanup', authMiddleware, cleanupRoutes);
 
 // Error handling middleware
 app.use(errorHandler);

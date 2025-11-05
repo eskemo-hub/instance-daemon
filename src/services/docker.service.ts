@@ -914,4 +914,152 @@ export class DockerService {
     }
     return String(error);
   }
+
+  /**
+   * List all Docker volumes
+   */
+  async listAllVolumes(): Promise<Array<{
+    name: string;
+    driver: string;
+    mountpoint: string;
+    created: string;
+    labels: Record<string, string>;
+  }>> {
+    return this.retryOperation(async () => {
+      try {
+        const volumes = await this.docker.listVolumes();
+        return volumes.Volumes.map(volume => ({
+          name: volume.Name,
+          driver: volume.Driver,
+          mountpoint: volume.Mountpoint,
+          created: volume.CreatedAt || '',
+          labels: volume.Labels || {},
+        }));
+      } catch (error) {
+        throw new Error(`Failed to list volumes: ${this.getErrorMessage(error)}`);
+      }
+    });
+  }
+
+  /**
+   * Remove a Docker volume
+   */
+  async removeVolume(volumeName: string): Promise<void> {
+    return this.retryOperation(async () => {
+      try {
+        const volume = this.docker.getVolume(volumeName);
+        await volume.remove();
+        console.log(`[DOCKER] Removed volume: ${volumeName}`);
+      } catch (error) {
+        const errorMessage = this.getErrorMessage(error);
+        // Check if volume is in use
+        if (errorMessage.includes('in use') || errorMessage.includes('is being used')) {
+          throw new Error(`Volume ${volumeName} is in use and cannot be removed`);
+        }
+        throw new Error(`Failed to remove volume ${volumeName}: ${errorMessage}`);
+      }
+    });
+  }
+
+  /**
+   * Get information about unused images
+   */
+  async listUnusedImages(): Promise<Array<{
+    id: string;
+    tags: string[];
+    size: number;
+    created: number;
+    parentId: string;
+  }>> {
+    return this.retryOperation(async () => {
+      try {
+        const images = await this.docker.listImages({ all: true, filters: { dangling: ['false'] } });
+        const containers = await this.docker.listContainers({ all: true });
+        
+        // Get all images in use by containers
+        const imagesInUse = new Set<string>();
+        containers.forEach(container => {
+          if (container.ImageID) {
+            imagesInUse.add(container.ImageID);
+          }
+          // Also check by image name/tag
+          if (container.Image) {
+            images.forEach(img => {
+              if (img.RepoTags && img.RepoTags.some(tag => tag === container.Image || tag.includes(container.Image.split(':')[0]))) {
+                imagesInUse.add(img.Id);
+              }
+            });
+          }
+        });
+
+        // Filter to unused images
+        return images
+          .filter(img => !imagesInUse.has(img.Id))
+          .map(img => ({
+            id: img.Id,
+            tags: img.RepoTags || [],
+            size: img.Size || 0,
+            created: img.Created || 0,
+            parentId: img.ParentId || '',
+          }));
+      } catch (error) {
+        throw new Error(`Failed to list unused images: ${this.getErrorMessage(error)}`);
+      }
+    });
+  }
+
+  /**
+   * Prune unused images
+   * @param options - Prune options
+   * @returns Prune results
+   */
+  async pruneImages(options?: {
+    filters?: { until?: string; label?: string };
+  }): Promise<{
+    imagesDeleted: string[];
+    spaceReclaimed: number;
+  }> {
+    return this.retryOperation(async () => {
+      try {
+        const pruneFilters: any = {};
+        if (options?.filters?.until) {
+          pruneFilters.until = options.filters.until;
+        }
+        if (options?.filters?.label) {
+          pruneFilters.label = options.filters.label;
+        }
+
+        const result = await this.docker.pruneImages({ filters: pruneFilters });
+        
+        return {
+          imagesDeleted: result.ImagesDeleted?.map((img: any) => img.Deleted || img.Untagged || '').filter(Boolean) || [],
+          spaceReclaimed: result.SpaceReclaimed || 0,
+        };
+      } catch (error) {
+        throw new Error(`Failed to prune images: ${this.getErrorMessage(error)}`);
+      }
+    });
+  }
+
+  /**
+   * Prune unused volumes
+   * @returns Prune results
+   */
+  async pruneVolumes(): Promise<{
+    volumesDeleted: string[];
+    spaceReclaimed: number;
+  }> {
+    return this.retryOperation(async () => {
+      try {
+        const result = await this.docker.pruneVolumes({});
+        
+        return {
+          volumesDeleted: result.VolumesDeleted || [],
+          spaceReclaimed: result.SpaceReclaimed || 0,
+        };
+      } catch (error) {
+        throw new Error(`Failed to prune volumes: ${this.getErrorMessage(error)}`);
+      }
+    });
+  }
 }
