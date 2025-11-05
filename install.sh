@@ -110,6 +110,13 @@ if [ ! -d "$REPO_DIR" ]; then
   fi
 else
   echo -e "${GREEN}Repository already cloned at $REPO_DIR.${NC}"
+  echo -e "${GREEN}Pulling latest changes...${NC}"
+  # Pull latest code as daemon user; fast-forward only to avoid unintended merges
+  if ! su -s /bin/bash n8n-daemon -c "git -C $REPO_DIR pull --ff-only"; then
+    echo -e "${YELLOW}Fast-forward pull failed. Attempting hard reset to origin/main...${NC}"
+    su -s /bin/bash n8n-daemon -c "git -C $REPO_DIR fetch --all --tags"
+    su -s /bin/bash n8n-daemon -c "git -C $REPO_DIR reset --hard origin/main"
+  fi
 fi
 
 # Step 6: Install dependencies and build
@@ -128,6 +135,12 @@ fi
 
 su -s /bin/bash n8n-daemon -c "$NPM_BIN install"
 su -s /bin/bash n8n-daemon -c "$NPM_BIN run build"
+
+# Restart service if already installed
+if [ -f "/etc/systemd/system/n8n-daemon.service" ]; then
+  echo -e "${GREEN}Restarting n8n-daemon service...${NC}"
+  systemctl restart n8n-daemon || true
+fi
 
 # Step 7: Configure .env
 ENV_FILE="$REPO_DIR/.env"

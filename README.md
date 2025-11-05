@@ -41,10 +41,10 @@ sudo ./install.sh    # or: sudo bash ./install.sh
 The installer will:
 - Check and install prerequisites (Node.js, npm, Docker, Git)
 - Create the `n8n-daemon` system user
-- Clone the daemon to `/opt/n8n-daemon/daemon`
+- Clone the daemon to `/opt/n8n-daemon/daemon` (or pull latest if already cloned)
 - Install dependencies and build the app
 - Generate an API key and configure `.env`
-- Set up and start the `systemd` service
+- Set up and start the `systemd` service (or restart if already installed)
 
 ### Development Setup
 
