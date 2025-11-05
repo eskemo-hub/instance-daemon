@@ -3,6 +3,7 @@ import { ComposeStackConfig, ComposeStackInfo } from '../types';
 import { execSync, exec } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as yaml from 'js-yaml';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
@@ -35,9 +36,38 @@ export class ComposeStackService {
         fs.mkdirSync(stackDir, { recursive: true, mode: 0o755 });
       }
 
+      // Process and enhance compose file with Traefik labels and environment variables
+      let composeContent = config.composeFile;
+      let composeData: any = {};
+      
+      try {
+        // Try to parse as YAML
+        composeData = yaml.load(composeContent) as any;
+        
+        // If Traefik is enabled, add labels to services
+        if (config.useTraefik && config.domain && config.subdomain) {
+          composeData = this.addTraefikLabels(composeData, config.domain, config.subdomain, config.port);
+        }
+        
+        // Add environment variables to services if provided
+        if (config.environment && Object.keys(config.environment).length > 0) {
+          composeData = this.addEnvironmentVariables(composeData, config.environment);
+        }
+        
+        // Convert back to YAML
+        composeContent = yaml.dump(composeData, { 
+          lineWidth: -1,
+          noRefs: true,
+          quotingType: '"'
+        });
+      } catch (error) {
+        // If YAML parsing fails, use original content (might be a template)
+        console.warn(`[COMPOSE] Could not parse compose file as YAML, using as-is: ${this.getErrorMessage(error)}`);
+      }
+
       // Write compose file
       const composeFilePath = path.join(stackDir, 'docker-compose.yml');
-      fs.writeFileSync(composeFilePath, config.composeFile, { mode: 0o644 });
+      fs.writeFileSync(composeFilePath, composeContent, { mode: 0o644 });
 
       // Process environment variables and create .env file if needed
       if (config.environment && Object.keys(config.environment).length > 0) {
@@ -469,6 +499,158 @@ export class ComposeStackService {
     }
 
     return 0;
+  }
+
+  /**
+   * Restart a specific service in a stack
+   */
+  async restartService(stackName: string, serviceName: string): Promise<void> {
+    try {
+      const stackDir = path.join(this.COMPOSE_DIR, stackName);
+      const composeFilePath = path.join(stackDir, 'docker-compose.yml');
+
+      if (!fs.existsSync(composeFilePath)) {
+        throw new Error(`Compose stack not found: ${stackName}`);
+      }
+
+      const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" restart ${serviceName}`;
+      console.log(`[COMPOSE] Restarting service ${serviceName} in stack: ${stackName}`);
+
+      execSync(composeCommand, {
+        cwd: stackDir,
+        stdio: 'pipe'
+      });
+    } catch (error) {
+      throw new Error(`Failed to restart service ${serviceName}: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Get list of services in a stack
+   */
+  async getStackServices(stackName: string): Promise<string[]> {
+    try {
+      const stackInfo = await this.getStackStatus(stackName);
+      return stackInfo.services.map(s => s.name);
+    } catch (error) {
+      throw new Error(`Failed to get stack services: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Add Traefik labels to services in compose file
+   */
+  private addTraefikLabels(composeData: any, domain: string, subdomain: string, port: number): any {
+    if (!composeData.services) {
+      return composeData;
+    }
+
+    const fullDomain = `${subdomain}.${domain}`;
+    const routerName = subdomain.replace(/[^a-z0-9]/g, '');
+    const traefikNetwork = 'traefik-network';
+
+    // Add networks section if it doesn't exist
+    if (!composeData.networks) {
+      composeData.networks = {};
+    }
+    if (!composeData.networks[traefikNetwork]) {
+      composeData.networks[traefikNetwork] = {
+        external: true
+      };
+    }
+
+    // Add Traefik labels to each service
+    for (const [serviceName, serviceConfig] of Object.entries(composeData.services)) {
+      const service = serviceConfig as any;
+      
+      // Skip database services (they should use HAProxy or TCP routing)
+      if (serviceName.toLowerCase().includes('db') || 
+          serviceName.toLowerCase().includes('database') ||
+          serviceName.toLowerCase().includes('mysql') ||
+          serviceName.toLowerCase().includes('postgres') ||
+          serviceName.toLowerCase().includes('mongo')) {
+        continue;
+      }
+
+      // Initialize labels if not present
+      if (!service.labels) {
+        service.labels = {};
+      }
+
+      // Add Traefik labels
+      service.labels['traefik.enable'] = 'true';
+      service.labels['traefik.docker.network'] = `${traefikNetwork}`;
+      service.labels[`traefik.http.routers.${routerName}.rule`] = `Host(\`${fullDomain}\`)`;
+      service.labels[`traefik.http.routers.${routerName}.entrypoints`] = 'websecure';
+      service.labels[`traefik.http.routers.${routerName}.tls.certresolver`] = 'letsencrypt';
+      
+      // Determine service port
+      let servicePort = port;
+      if (service.ports && Array.isArray(service.ports) && service.ports.length > 0) {
+        const portMapping = service.ports[0];
+        if (typeof portMapping === 'string') {
+          const match = portMapping.match(/:(\d+)/);
+          if (match) {
+            servicePort = parseInt(match[1]);
+          }
+        } else if (typeof portMapping === 'object' && portMapping.target) {
+          servicePort = portMapping.target;
+        }
+      }
+      
+      service.labels[`traefik.http.services.${routerName}.loadbalancer.server.port`] = servicePort.toString();
+
+      // Add network to service
+      if (!service.networks) {
+        service.networks = [];
+      }
+      if (!service.networks.includes(traefikNetwork)) {
+        service.networks.push(traefikNetwork);
+      }
+    }
+
+    return composeData;
+  }
+
+  /**
+   * Add environment variables to services in compose file
+   */
+  private addEnvironmentVariables(composeData: any, envVars: Record<string, string>): any {
+    if (!composeData.services) {
+      return composeData;
+    }
+
+    // Add environment variables to each service
+    for (const [serviceName, serviceConfig] of Object.entries(composeData.services)) {
+      const service = serviceConfig as any;
+      
+      // Initialize environment if not present
+      if (!service.environment) {
+        service.environment = {};
+      }
+
+      // If environment is an array, convert to object
+      if (Array.isArray(service.environment)) {
+        const envObj: Record<string, string> = {};
+        for (const env of service.environment) {
+          if (typeof env === 'string') {
+            const [key, ...valueParts] = env.split('=');
+            if (key) {
+              envObj[key] = valueParts.join('=');
+            }
+          }
+        }
+        service.environment = envObj;
+      }
+
+      // Merge environment variables
+      service.environment = {
+        ...service.environment,
+        ...envVars
+      };
+    }
+
+    return composeData;
   }
 
   /**

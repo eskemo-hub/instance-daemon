@@ -213,4 +213,53 @@ composeRoutes.get('/:stackName/metrics', async (req: Request, res: Response, nex
   }
 });
 
+/**
+ * GET /api/compose/:stackName/services
+ * Get list of services in a stack
+ */
+composeRoutes.get('/:stackName/services', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { stackName } = req.params;
+
+    if (!stackName) {
+      throw new ValidationError('Missing required parameter: stackName');
+    }
+
+    const services = await composeStackService.getStackServices(stackName);
+    
+    return res.json({
+      success: true,
+      data: services
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/compose/:stackName/services/:serviceName/restart
+ * Restart a specific service in a stack
+ */
+composeRoutes.post('/:stackName/services/:serviceName/restart', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { stackName, serviceName } = req.params;
+
+    if (!stackName) {
+      throw new ValidationError('Missing required parameter: stackName');
+    }
+    if (!serviceName) {
+      throw new ValidationError('Missing required parameter: serviceName');
+    }
+
+    await composeStackService.restartService(stackName, serviceName);
+    
+    return res.json({
+      success: true,
+      message: `Service ${serviceName} in stack ${stackName} restarted successfully`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 export default composeRoutes;
