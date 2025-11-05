@@ -336,6 +336,25 @@ else
   fi
 fi
 
+# Install or update systemd update service (runs update script on demand)
+if [ ! -f "/etc/systemd/system/n8n-daemon-update.service" ]; then
+  echo -e "${GREEN}Installing n8n-daemon-update service...${NC}"
+  cp "$REPO_DIR/n8n-daemon-update.service" "/etc/systemd/system/"
+  systemctl daemon-reload
+  echo -e "${GREEN}Update service installed. It will be triggered by the API when needed.${NC}"
+else
+  echo -e "${GREEN}Update service already installed.${NC}"
+  if ! cmp -s "$REPO_DIR/n8n-daemon-update.service" "/etc/systemd/system/n8n-daemon-update.service"; then
+    echo -e "${YELLOW}Update service unit has changed. Updating...${NC}"
+    cp "$REPO_DIR/n8n-daemon-update.service" "/etc/systemd/system/n8n-daemon-update.service"
+    systemctl daemon-reload
+    echo -e "${GREEN}Update service unit updated.${NC}"
+  fi
+fi
+
+# Ensure the update script is executable
+chmod +x "$REPO_DIR/update-from-github.sh"
+
 echo -e "${GREEN}Installation complete!${NC}"
 echo "API Key: $API_KEY"
 echo "Daemon is running on port $PORT."

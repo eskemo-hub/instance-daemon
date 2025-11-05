@@ -121,6 +121,18 @@ GITHUB_BRANCH=${githubBranch || process.env.GITHUB_BRANCH || 'main'}
         if (error) {
           console.error('Failed to start update service:', error);
           console.error('stderr:', stderr);
+          // Fallback: run update script directly in background with log redirection
+          const directCmd = `nohup bash "${updateScript}" >> ${logFile} 2>&1 &`;
+          console.log('Falling back to direct update script execution');
+          exec(directCmd, { env }, (directErr, _out, directStderr) => {
+            if (directErr) {
+              console.error('Failed to start direct update script:', directErr);
+              if (directStderr) console.error('stderr:', directStderr);
+            } else {
+              console.log('Direct update script started successfully');
+              console.log('Update logs will be in:', logFile);
+            }
+          });
         } else {
           console.log('Update service started successfully');
         }
