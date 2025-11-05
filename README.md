@@ -29,6 +29,23 @@ curl -fsSL https://raw.githubusercontent.com/eskemo-hub/instance-daemon/main/ins
 
 *Note: This will install prerequisites, create the daemon user, clone the repository, and set up the service.*
 
+### Interactive Installer (Local Copy)
+
+If you already have the repository on the server, use the interactive installer:
+
+```bash
+cd /path/to/n8n-daemon-repo
+sudo ./install.sh    # or: sudo bash ./install.sh
+```
+
+The installer will:
+- Check and install prerequisites (Node.js, npm, Docker, Git)
+- Create the `n8n-daemon` system user
+- Clone the daemon to `/opt/n8n-daemon/daemon`
+- Install dependencies and build the app
+- Generate an API key and configure `.env`
+- Set up and start the `systemd` service
+
 ### Development Setup
 
 For local development:

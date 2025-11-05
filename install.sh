@@ -62,6 +62,13 @@ else
   fi
 fi
 
+# Ensure npm is available system-wide (handles NVM-only setups)
+if ! command -v npm &> /dev/null; then
+  echo -e "${YELLOW}npm not found in PATH. Installing Node.js with npm (NodeSource 20.x)...${NC}"
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  apt-get install -y nodejs
+fi
+
 # Step 3: Install Docker if not present
 if ! command -v docker &> /dev/null; then
   if prompt_yes_no "Docker is not installed. Install Docker?"; then
@@ -107,8 +114,20 @@ fi
 
 # Step 6: Install dependencies and build
 cd $REPO_DIR
-su -s /bin/bash n8n-daemon -c "npm install"
-su -s /bin/bash n8n-daemon -c "npm run build"
+NPM_BIN=$(command -v npm || true)
+if [ -z "$NPM_BIN" ]; then
+  # Try common npm path as fallback
+  if [ -x "/usr/bin/npm" ]; then
+    NPM_BIN="/usr/bin/npm"
+  else
+    echo -e "${RED}npm is still not available. Ensure Node.js (with npm) is installed system-wide.${NC}"
+    echo -e "${YELLOW}You can re-run the installer after: curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs${NC}"
+    exit 1
+  fi
+fi
+
+su -s /bin/bash n8n-daemon -c "$NPM_BIN install"
+su -s /bin/bash n8n-daemon -c "$NPM_BIN run build"
 
 # Step 7: Configure .env
 ENV_FILE="$REPO_DIR/.env"
