@@ -66,6 +66,8 @@ export interface ComposeStackConfig {
   subdomain?: string;
   publicAccess?: boolean;
   port: number;
+  // Traefik service configuration from template
+  traefikConfig?: Record<string, { internalPort: number; enabled: boolean }>;
   // Resource limits (applied to main service or all services)
   cpuLimit?: number;
   memoryLimit?: string;

@@ -46,7 +46,13 @@ export class ComposeStackService {
         
         // If Traefik is enabled, add labels to services
         if (config.useTraefik && config.domain && config.subdomain) {
-          composeData = this.addTraefikLabels(composeData, config.domain, config.subdomain, config.port);
+          composeData = this.addTraefikLabels(
+            composeData, 
+            config.domain, 
+            config.subdomain, 
+            config.port,
+            config.traefikConfig
+          );
         }
         
         // Add environment variables to services if provided
@@ -601,13 +607,17 @@ export class ComposeStackService {
   /**
    * Add Traefik labels to services in compose file
    */
-  private addTraefikLabels(composeData: any, domain: string, subdomain: string, port: number): any {
+  private addTraefikLabels(
+    composeData: any, 
+    domain: string, 
+    subdomain: string, 
+    port: number,
+    traefikConfig?: Record<string, { internalPort: number; enabled: boolean }>
+  ): any {
     if (!composeData.services) {
       return composeData;
     }
 
-    const fullDomain = `${subdomain}.${domain}`;
-    const routerName = subdomain.replace(/[^a-z0-9]/g, '');
     const traefikNetwork = 'traefik-network';
 
     // Add networks section if it doesn't exist
@@ -624,13 +634,23 @@ export class ComposeStackService {
     for (const [serviceName, serviceConfig] of Object.entries(composeData.services)) {
       const service = serviceConfig as any;
       
-      // Skip database services (they should use HAProxy or TCP routing)
-      if (serviceName.toLowerCase().includes('db') || 
-          serviceName.toLowerCase().includes('database') ||
-          serviceName.toLowerCase().includes('mysql') ||
-          serviceName.toLowerCase().includes('postgres') ||
-          serviceName.toLowerCase().includes('mongo')) {
+      // Check if service has Traefik configuration
+      const serviceTraefikConfig = traefikConfig?.[serviceName];
+      
+      // Skip if Traefik config exists and service is disabled
+      if (serviceTraefikConfig && !serviceTraefikConfig.enabled) {
         continue;
+      }
+
+      // Skip database services by default (unless explicitly enabled in traefikConfig)
+      if (!serviceTraefikConfig) {
+        if (serviceName.toLowerCase().includes('db') || 
+            serviceName.toLowerCase().includes('database') ||
+            serviceName.toLowerCase().includes('mysql') ||
+            serviceName.toLowerCase().includes('postgres') ||
+            serviceName.toLowerCase().includes('mongo')) {
+          continue;
+        }
       }
 
       // Initialize labels if not present
@@ -638,28 +658,39 @@ export class ComposeStackService {
         service.labels = {};
       }
 
+      // Generate unique router name for each service
+      const serviceRouterName = `${subdomain.replace(/[^a-z0-9]/g, '')}-${serviceName}`;
+      const serviceFullDomain = `${serviceName}.${subdomain}.${domain}`;
+
       // Add Traefik labels
       service.labels['traefik.enable'] = 'true';
       service.labels['traefik.docker.network'] = `${traefikNetwork}`;
-      service.labels[`traefik.http.routers.${routerName}.rule`] = `Host(\`${fullDomain}\`)`;
-      service.labels[`traefik.http.routers.${routerName}.entrypoints`] = 'websecure';
-      service.labels[`traefik.http.routers.${routerName}.tls.certresolver`] = 'letsencrypt';
+      service.labels[`traefik.http.routers.${serviceRouterName}.rule`] = `Host(\`${serviceFullDomain}\`)`;
+      service.labels[`traefik.http.routers.${serviceRouterName}.entrypoints`] = 'websecure';
+      service.labels[`traefik.http.routers.${serviceRouterName}.tls.certresolver`] = 'letsencrypt';
       
-      // Determine service port
-      let servicePort = port;
-      if (service.ports && Array.isArray(service.ports) && service.ports.length > 0) {
-        const portMapping = service.ports[0];
-        if (typeof portMapping === 'string') {
-          const match = portMapping.match(/:(\d+)/);
-          if (match) {
-            servicePort = parseInt(match[1]);
+      // Determine service port from config or compose file
+      let servicePort: number;
+      if (serviceTraefikConfig?.internalPort) {
+        // Use port from Traefik config
+        servicePort = serviceTraefikConfig.internalPort;
+      } else {
+        // Fallback: try to detect from compose file ports
+        servicePort = port; // Default to main port
+        if (service.ports && Array.isArray(service.ports) && service.ports.length > 0) {
+          const portMapping = service.ports[0];
+          if (typeof portMapping === 'string') {
+            const match = portMapping.match(/:(\d+)/);
+            if (match) {
+              servicePort = parseInt(match[1]);
+            }
+          } else if (typeof portMapping === 'object' && portMapping.target) {
+            servicePort = portMapping.target;
           }
-        } else if (typeof portMapping === 'object' && portMapping.target) {
-          servicePort = portMapping.target;
         }
       }
       
-      service.labels[`traefik.http.services.${routerName}.loadbalancer.server.port`] = servicePort.toString();
+      service.labels[`traefik.http.services.${serviceRouterName}.loadbalancer.server.port`] = servicePort.toString();
 
       // Add network to service
       if (!service.networks) {

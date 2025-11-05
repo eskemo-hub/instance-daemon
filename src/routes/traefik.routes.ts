@@ -67,3 +67,72 @@ traefikRoutes.delete('/', async (_req: Request, res: Response, next: NextFunctio
     next(error);
   }
 });
+
+/**
+ * POST /api/traefik/restart
+ * Restart Traefik container
+ */
+traefikRoutes.post('/restart', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    await traefikService.restartTraefik();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Traefik restarted successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/traefik/logs
+ * Get Traefik container logs
+ */
+traefikRoutes.get('/logs', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tail = req.query.tail ? parseInt(req.query.tail as string, 10) : 100;
+    const logs = await traefikService.getTraefikLogs(tail);
+    
+    res.status(200).json({
+      success: true,
+      data: { logs }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/traefik/config
+ * Get Traefik container configuration
+ */
+traefikRoutes.get('/config', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const config = await traefikService.getTraefikConfig();
+    
+    res.status(200).json({
+      success: true,
+      data: config
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/traefik/dashboard
+ * Get Traefik dashboard information
+ */
+traefikRoutes.get('/dashboard', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const dashboardInfo = await traefikService.getDashboardInfo();
+    
+    res.status(200).json({
+      success: true,
+      data: dashboardInfo
+    });
+  } catch (error) {
+    next(error);
+  }
+});

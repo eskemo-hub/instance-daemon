@@ -245,6 +245,104 @@ export class TraefikService {
   }
 
   /**
+   * Restart Traefik container
+   */
+  async restartTraefik(): Promise<void> {
+    try {
+      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      await container.restart({ t: 10 });
+      console.log('Traefik container restarted');
+    } catch (error) {
+      if (this.getErrorMessage(error).includes('no such container')) {
+        throw new Error('Traefik is not installed');
+      }
+      throw new Error(`Failed to restart Traefik: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Get Traefik container logs
+   */
+  async getTraefikLogs(tail: number = 100): Promise<string> {
+    try {
+      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const logs = await container.logs({
+        stdout: true,
+        stderr: true,
+        tail: tail,
+        timestamps: true,
+      });
+      return logs.toString('utf-8');
+    } catch (error) {
+      if (this.getErrorMessage(error).includes('no such container')) {
+        throw new Error('Traefik is not installed');
+      }
+      throw new Error(`Failed to get Traefik logs: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Get Traefik container configuration
+   */
+  async getTraefikConfig(): Promise<any> {
+    try {
+      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const info = await container.inspect();
+      
+      // Extract relevant configuration
+      return {
+        id: info.Id,
+        name: info.Name,
+        image: info.Config.Image,
+        state: info.State.Status,
+        running: info.State.Running,
+        command: info.Config.Cmd?.join(' ') || '',
+        env: info.Config.Env || [],
+        labels: info.Config.Labels || {},
+        ports: info.NetworkSettings?.Ports || {},
+        created: info.Created,
+        startedAt: info.State.StartedAt,
+      };
+    } catch (error) {
+      if (this.getErrorMessage(error).includes('no such container')) {
+        throw new Error('Traefik is not installed');
+      }
+      throw new Error(`Failed to get Traefik config: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Get Traefik dashboard information
+   */
+  async getDashboardInfo(): Promise<{ enabled: boolean; url?: string; domain?: string }> {
+    try {
+      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const info = await container.inspect();
+      
+      // Check if dashboard is enabled in command args
+      const cmdArgs = info.Config.Cmd || [];
+      const dashboardEnabled = cmdArgs.some(arg => arg.includes('api.dashboard=true'));
+      
+      // Extract domain from labels
+      const labels = info.Config.Labels || {};
+      const routerRule = labels['traefik.http.routers.traefik.rule'] || '';
+      const domainMatch = routerRule.match(/Host\(`traefik\.(.+)`\)/);
+      const domain = domainMatch ? domainMatch[1] : undefined;
+      
+      return {
+        enabled: dashboardEnabled,
+        url: domain ? `https://traefik.${domain}` : undefined,
+        domain: domain,
+      };
+    } catch (error) {
+      if (this.getErrorMessage(error).includes('no such container')) {
+        return { enabled: false };
+      }
+      throw new Error(`Failed to get dashboard info: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
    * Extract error message from unknown error type
    */
   private getErrorMessage(error: unknown): string {
