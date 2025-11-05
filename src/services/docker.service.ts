@@ -167,11 +167,16 @@ export class DockerService {
             containerConfig.HostConfig.NetworkMode = 'traefik-network';
           }
         } else if (config.isStackService) {
-          // Stack service: Use internal networking only, no host port binding
-          // This prevents port conflicts and allows services to communicate internally
+          // Stack service (non-main): Use bridge network with localhost binding
+          // This allows internal communication while preventing external access
           containerConfig.HostConfig.NetworkMode = 'bridge';
-          // No PortBindings - services communicate via Docker internal networking
-          console.log(`[DOCKER] Creating stack service ${config.name} with internal networking only`);
+          containerConfig.HostConfig.PortBindings = {
+            [`${internalPort}/tcp`]: [{ 
+              HostIp: '127.0.0.1',  // Localhost only for internal services
+              HostPort: config.port.toString() 
+            }]
+          };
+          console.log(`[DOCKER] Creating stack service ${config.name} with internal networking (localhost:${config.port})`);
         } else {
           // Direct mode: bind to host port
           // Databases: localhost only (must use HAProxy)
