@@ -52,6 +52,31 @@ app.use('/api/cleanup', authMiddleware, cleanupRoutes);
 // Error handling middleware
 app.use(errorHandler);
 
+// Process-level error handlers to prevent crashes from unhandled errors
+process.on('uncaughtException', (error: Error) => {
+  console.error('[FATAL] Uncaught Exception:', error.message);
+  console.error('[FATAL] Stack:', error.stack);
+  // Don't exit - let the process continue but log the error
+  // The daemon should continue running to handle other requests
+});
+
+process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+  console.error('[FATAL] Unhandled Rejection at:', promise);
+  console.error('[FATAL] Reason:', reason);
+  // Log but don't exit - the error handler middleware should handle it
+});
+
+// Handle DNS errors gracefully
+process.on('error', (error: Error) => {
+  if (error.message && error.message.includes('getaddrinfo')) {
+    console.error('[NETWORK] DNS lookup error:', error.message);
+    // Log but don't crash - this might be a transient network issue
+  } else {
+    console.error('[FATAL] Process error:', error.message);
+    console.error('[FATAL] Stack:', error.stack);
+  }
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log(`Daemon server running on port ${PORT}`);

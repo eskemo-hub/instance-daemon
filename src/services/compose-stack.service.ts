@@ -126,15 +126,38 @@ export class ComposeStackService {
         execSync(composeCommand, {
           cwd: stackDir,
           stdio: 'pipe',
-          env: { ...process.env, ...config.environment }
+          env: { ...process.env, ...config.environment },
+          timeout: 300000 // 5 minutes timeout for large containers
         });
       } catch (error: any) {
         const errorMessage = error.stdout?.toString() || error.stderr?.toString() || error.message;
+        
+        // Check for port conflicts and provide clearer error message
+        if (errorMessage.includes('port is already allocated') || errorMessage.includes('port is already in use')) {
+          throw new Error(`Port conflict: ${errorMessage}. Please check if another container is using the same port.`);
+        }
+        
+        // Check for DNS errors
+        if (errorMessage.includes('getaddrinfo') || errorMessage.includes('EAI_AGAIN')) {
+          throw new Error(`DNS lookup failed: ${errorMessage}. Please check your compose file for invalid hostnames or network configuration.`);
+        }
+        
         throw new Error(`Failed to create compose stack: ${errorMessage}`);
       }
 
-      // Get stack status
-      const stackInfo = await this.getStackStatus(config.name);
+      // Get stack status (with error handling to prevent crashes)
+      let stackInfo: ComposeStackInfo;
+      try {
+        stackInfo = await this.getStackStatus(config.name);
+      } catch (error) {
+        // If getting stack status fails, still return a basic status
+        console.warn(`[COMPOSE] Could not get full stack status for ${config.name}:`, error);
+        stackInfo = {
+          name: config.name,
+          status: 'unknown',
+          services: []
+        };
+      }
       return stackInfo;
     } catch (error) {
       throw new Error(`Failed to create compose stack: ${this.getErrorMessage(error)}`);
@@ -545,17 +568,58 @@ export class ComposeStackService {
    * Create Docker volume if it doesn't exist
    */
   private async createVolumeIfNeeded(volumeName: string): Promise<void> {
-    try {
-      const volume = this.docker.getVolume(volumeName);
-      await volume.inspect();
-      // Volume exists
-    } catch (error: any) {
-      if (error.statusCode === 404) {
-        // Volume doesn't exist, create it
-        await this.docker.createVolume({ Name: volumeName });
-        console.log(`[COMPOSE] Created volume: ${volumeName}`);
-      } else {
-        throw error;
+    // Check if this is a host path (starts with /) vs a Docker volume name
+    if (volumeName.startsWith('/')) {
+      // This is a host path (bind mount), create directory structure
+      try {
+        const hostDir = path.resolve(volumeName);
+        if (!fs.existsSync(hostDir)) {
+          console.log(`[COMPOSE] Creating host directory: ${hostDir}`);
+          fs.mkdirSync(hostDir, { recursive: true, mode: 0o755 });
+          
+          // Set proper ownership if running as root (common in daemon environments)
+          try {
+            // Try to set ownership to 1000:1000 (common Docker user)
+            execSync(`chown -R 1000:1000 "${hostDir}"`, { stdio: 'ignore' });
+            console.log(`[COMPOSE] Set ownership of ${hostDir} to 1000:1000`);
+          } catch (chownError) {
+            // Continue anyway - the directory was created with proper mode
+            console.warn(`[COMPOSE] Could not set ownership for ${hostDir}: ${chownError}`);
+          }
+        } else {
+          console.log(`[COMPOSE] Host directory already exists: ${hostDir}`);
+        }
+      } catch (error) {
+        // Don't throw - host directory creation is not critical if it fails
+        // The compose command will handle it or fail with a clearer error
+        console.warn(`[COMPOSE] Could not create host directory ${volumeName}:`, error);
+      }
+    } else {
+      // This is a Docker volume name, try to create Docker volume
+      try {
+        const volume = this.docker.getVolume(volumeName);
+        await volume.inspect();
+        // Volume exists
+        console.log(`[COMPOSE] Volume already exists: ${volumeName}`);
+      } catch (error: any) {
+        if (error.statusCode === 404) {
+          // Volume doesn't exist, create it
+          try {
+            await this.docker.createVolume({ Name: volumeName });
+            console.log(`[COMPOSE] Created Docker volume: ${volumeName}`);
+          } catch (createError: any) {
+            // Handle HTTP 301 and other Docker API errors gracefully
+            if (createError.statusCode === 301 || createError.statusCode >= 400) {
+              console.warn(`[COMPOSE] Could not create Docker volume ${volumeName}:`, createError.message);
+              // Don't throw - volume creation might be handled by compose file itself
+            } else {
+              throw createError;
+            }
+          }
+        } else {
+          // For other errors (like 301), log but don't throw
+          console.warn(`[COMPOSE] Could not inspect Docker volume ${volumeName}:`, error.message);
+        }
       }
     }
   }
@@ -689,9 +753,50 @@ export class ComposeStackService {
       };
     }
 
+    // Handle main URL routing (if configured)
+    const mainConfig = traefikConfig?.['_main'] as { serviceName?: string; internalPort?: number } | undefined;
+    if (mainConfig?.serviceName && mainConfig.internalPort) {
+      const mainServiceName = mainConfig.serviceName;
+      const mainService = composeData.services[mainServiceName] as any;
+      
+      if (mainService) {
+        // Initialize labels if not present
+        if (!mainService.labels) {
+          mainService.labels = {};
+        }
+
+        // Generate router name for main URL
+        const mainRouterName = `${subdomain.replace(/[^a-z0-9]/g, '')}-main`;
+        const mainFullDomain = `${subdomain}.${domain}`;
+
+        // Add Traefik labels for main URL
+        mainService.labels['traefik.enable'] = 'true';
+        mainService.labels['traefik.docker.network'] = `${traefikNetwork}`;
+        mainService.labels[`traefik.http.routers.${mainRouterName}.rule`] = `Host(\`${mainFullDomain}\`)`;
+        mainService.labels[`traefik.http.routers.${mainRouterName}.entrypoints`] = 'websecure';
+        mainService.labels[`traefik.http.routers.${mainRouterName}.tls.certresolver`] = 'letsencrypt';
+        mainService.labels[`traefik.http.services.${mainRouterName}.loadbalancer.server.port`] = mainConfig.internalPort.toString();
+        
+        console.log(`[COMPOSE] Configured main URL routing: ${mainFullDomain} → ${mainServiceName}:${mainConfig.internalPort}`);
+
+        // Add network to main service
+        if (!mainService.networks) {
+          mainService.networks = [];
+        }
+        if (!mainService.networks.includes(traefikNetwork)) {
+          mainService.networks.push(traefikNetwork);
+        }
+      }
+    }
+
     // Add Traefik labels to each service
     for (const [serviceName, serviceConfig] of Object.entries(composeData.services)) {
       const service = serviceConfig as any;
+      
+      // Skip _main entry (it's metadata, not a service)
+      if (serviceName === '_main') {
+        continue;
+      }
       
       // Check if service has Traefik configuration
       const serviceTraefikConfig = traefikConfig?.[serviceName];
