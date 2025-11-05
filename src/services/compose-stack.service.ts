@@ -132,6 +132,16 @@ export class ComposeStackService {
       } catch (error: any) {
         const errorMessage = error.stdout?.toString() || error.stderr?.toString() || error.message;
         
+        // Cleanup any partially created containers
+        console.log(`[COMPOSE] Deployment failed, cleaning up any partially created containers for stack: ${config.name}`);
+        try {
+          await this.removeStack(config.name, false);
+          console.log(`[COMPOSE] Cleaned up partially created stack: ${config.name}`);
+        } catch (cleanupError) {
+          // Log cleanup errors but don't fail on them - the original error is more important
+          console.warn(`[COMPOSE] Failed to cleanup partially created stack (this is okay): ${this.getErrorMessage(cleanupError)}`);
+        }
+        
         // Check for port conflicts and provide clearer error message
         if (errorMessage.includes('port is already allocated') || errorMessage.includes('port is already in use')) {
           throw new Error(`Port conflict: ${errorMessage}. Please check if another container is using the same port.`);

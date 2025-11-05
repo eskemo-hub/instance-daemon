@@ -922,7 +922,6 @@ export class DockerService {
     name: string;
     driver: string;
     mountpoint: string;
-    created: string;
     labels: Record<string, string>;
   }>> {
     return this.retryOperation(async () => {
@@ -932,7 +931,6 @@ export class DockerService {
           name: volume.Name,
           driver: volume.Driver,
           mountpoint: volume.Mountpoint,
-          created: volume.CreatedAt || '',
           labels: volume.Labels || {},
         }));
       } catch (error) {
