@@ -21,7 +21,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=false
-ReadWritePaths=/opt/n8n-daemon /var/run/docker.sock /run/docker.sock
+ReadWritePaths=/opt/n8n-daemon /var/run/docker.sock /run/docker.sock /mnt/data /var/lib/docker/volumes
 SupplementaryGroups=docker
 
 # Environment

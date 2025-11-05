@@ -61,6 +61,9 @@ echo -e "${GREEN}✓ Backup created: $BACKUP_DIR${NC}"
 echo -e "${BLUE}[3/6] Pulling latest changes...${NC}"
 cd "$INSTALL_DIR"
 
+# Ensure Git trusts this directory when running under root
+git config --system --add safe.directory "$INSTALL_DIR" || true
+
 # Stash any local changes
 git stash > /dev/null 2>&1 || true
 

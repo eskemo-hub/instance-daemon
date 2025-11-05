@@ -58,6 +58,16 @@ get_env_var() {
   fi
 }
 
+# Detect placeholder-like API key values from the example file
+is_placeholder_api_key() {
+  local value="$1"
+  if echo "$value" | grep -q "^your-secure-api-key-here"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 # Step 1: Update system and install basics
 echo -e "${GREEN}Updating system packages...${NC}"
 apt update && apt upgrade -y
@@ -110,6 +120,82 @@ else
   echo -e "${GREEN}Docker is already installed.${NC}"
 fi
 
+# Optional: Install and configure HAProxy for database proxying
+if prompt_yes_no "Install and configure HAProxy for database proxying?"; then
+  echo -e "${GREEN}Installing HAProxy...${NC}"
+  apt install -y haproxy
+
+  # Offer to generate a minimal TCP pass-through config
+  if prompt_yes_no "Generate HAProxy config for database proxying now?"; then
+    read -p "Database type (postgres/mysql) [postgres]: " DB_TYPE
+    DB_TYPE=${DB_TYPE:-postgres}
+    if [ "$DB_TYPE" = "mysql" ]; then DEFAULT_PORT=3306; else DEFAULT_PORT=5432; fi
+
+    read -p "Frontend bind address [0.0.0.0]: " BIND_ADDR
+    BIND_ADDR=${BIND_ADDR:-0.0.0.0}
+    read -p "Frontend port [${DEFAULT_PORT}]: " FRONT_PORT
+    FRONT_PORT=${FRONT_PORT:-$DEFAULT_PORT}
+    read -p "Allowed CIDR (e.g., 10.0.0.0/8, leave blank to allow all): " ALLOWED_CIDR
+    read -p "Backend servers (comma-separated host:port): " BACKENDS
+
+    IFS=',' read -ra ADDR <<< "$BACKENDS"
+    BACKEND_LINES=""
+    for s in "${ADDR[@]}"; do
+      s_trim=$(echo "$s" | xargs)
+      if [ -n "$s_trim" ]; then
+        BACKEND_LINES="${BACKEND_LINES}    server $(echo "$s_trim" | sed 's/[^A-Za-z0-9]/_/g') $s_trim check inter 2s rise 3 fall 3 maxconn 200\n"
+      fi
+    done
+
+    if [ -z "$BACKEND_LINES" ]; then
+      echo -e "${YELLOW}No backend servers provided. Skipping HAProxy config generation.${NC}"
+    else
+      echo -e "${GREEN}Writing HAProxy config to /etc/haproxy/haproxy.cfg...${NC}"
+      cat >/etc/haproxy/haproxy.cfg <<EOF
+global
+  log /dev/log local0
+  log /dev/log local1 notice
+  maxconn 4096
+  daemon
+
+defaults
+  log     global
+  mode    tcp
+  option  tcplog
+  timeout connect 5s
+  timeout client  1m
+  timeout server  1m
+  option  tcp-check
+
+frontend db_frontend
+  bind ${BIND_ADDR}:${FRONT_PORT}
+  default_backend db_backends
+EOF
+      if [ -n "$ALLOWED_CIDR" ]; then
+        echo "  acl allowed_net src ${ALLOWED_CIDR}" >> /etc/haproxy/haproxy.cfg
+        echo "  tcp-request connection reject if !allowed_net" >> /etc/haproxy/haproxy.cfg
+      fi
+      cat >>/etc/haproxy/haproxy.cfg <<EOF
+
+backend db_backends
+  balance roundrobin
+  option tcp-check
+$(echo -e "$BACKEND_LINES")
+EOF
+
+      if haproxy -c -f /etc/haproxy/haproxy.cfg; then
+        systemctl enable haproxy
+        systemctl restart haproxy
+        echo -e "${GREEN}HAProxy configured and restarted on ${BIND_ADDR}:${FRONT_PORT}.${NC}"
+      else
+        echo -e "${RED}HAProxy config validation failed. File left in /etc/haproxy/haproxy.cfg.${NC}"
+      fi
+    fi
+  else
+    echo -e "${YELLOW}Skipping HAProxy config generation. You can edit /etc/haproxy/haproxy.cfg later.${NC}"
+  fi
+fi
+
 # Step 4: Create dedicated user
 if ! id "n8n-daemon" &> /dev/null; then
   if prompt_yes_no "Create dedicated user 'n8n-daemon'?"; then
@@ -143,6 +229,12 @@ else
     su -s /bin/bash n8n-daemon -c "git -C $REPO_DIR fetch --all --tags"
     su -s /bin/bash n8n-daemon -c "git -C $REPO_DIR reset --hard origin/main"
   fi
+fi
+
+# Configure Git safe.directory to prevent 'dubious ownership' errors when the service runs as root
+if command -v git >/dev/null 2>&1; then
+  echo -e "${GREEN}Configuring Git safe.directory for $REPO_DIR...${NC}"
+  git config --system --add safe.directory "$REPO_DIR" || true
 fi
 
 # Step 6: Install dependencies and build
@@ -179,7 +271,7 @@ CURRENT_PORT=$(get_env_var "PORT" "$ENV_FILE")
 CURRENT_NODE_ENV=$(get_env_var "NODE_ENV" "$ENV_FILE")
 
 # API_KEY: generate only if missing
-if [ -z "$CURRENT_API_KEY" ]; then
+if [ -z "$CURRENT_API_KEY" ] || is_placeholder_api_key "$CURRENT_API_KEY"; then
   API_KEY=$(openssl rand -base64 32)
   echo -e "${GREEN}Generated API Key: $API_KEY${NC}"
   echo "Adding API_KEY to .env. Save it securely."
@@ -207,6 +299,17 @@ else
 fi
 
 echo -e "${YELLOW}.env updated without overwriting existing values. Edit $ENV_FILE anytime.${NC}"
+
+# Final summary
+FINAL_PORT=$(get_env_var "PORT" "$ENV_FILE")
+FINAL_API_KEY=$(get_env_var "API_KEY" "$ENV_FILE")
+FINAL_NODE_ENV=$(get_env_var "NODE_ENV" "$ENV_FILE")
+
+echo -e "${GREEN}Installation complete!${NC}"
+echo "API Key: ${FINAL_API_KEY:-<not set>}"
+echo "Daemon is running on port ${FINAL_PORT:-<not set>}"
+echo "Environment: ${FINAL_NODE_ENV:-<not set>}"
+echo "For troubleshooting, see the README."
 
 # Step 8: Set up systemd service
 if [ ! -f "/etc/systemd/system/n8n-daemon.service" ]; then
