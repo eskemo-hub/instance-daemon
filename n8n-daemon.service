@@ -1,6 +1,6 @@
 [Unit]
 Description=n8n Daemon Service
-Documentation=https://github.com/yourusername/n8n-instance-manager
+Documentation=https://github.com/eskemo-hub/n8n-instance-manager
 After=network.target docker.service
 Requires=docker.service
 

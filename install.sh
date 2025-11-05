@@ -47,6 +47,17 @@ set_env_var() {
   fi
 }
 
+# Read a value from .env; outputs empty string if not present
+get_env_var() {
+  local key="$1"
+  local file="$2"
+  if [ -f "$file" ]; then
+    grep -E "^${key}=" "$file" | head -n1 | cut -d'=' -f2-
+  else
+    echo ""
+  fi
+}
+
 # Step 1: Update system and install basics
 echo -e "${GREEN}Updating system packages...${NC}"
 apt update && apt upgrade -y
@@ -157,30 +168,45 @@ if [ -f "/etc/systemd/system/n8n-daemon.service" ]; then
   systemctl restart n8n-daemon || true
 fi
 
-# Step 7: Configure .env
+# Step 7: Configure .env (preserve existing values; add only missing keys)
 ENV_FILE="$REPO_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then
   su -s /bin/bash n8n-daemon -c "cp .env.example .env"
 fi
 
-# Generate API key
-API_KEY=$(openssl rand -base64 32)
-echo -e "${GREEN}Generated API Key: $API_KEY${NC}"
-echo "Please save this securely. It will be added to .env."
+CURRENT_API_KEY=$(get_env_var "API_KEY" "$ENV_FILE")
+CURRENT_PORT=$(get_env_var "PORT" "$ENV_FILE")
+CURRENT_NODE_ENV=$(get_env_var "NODE_ENV" "$ENV_FILE")
 
-# Prompt for other configs
-read -p "Enter PORT (default 3001): " PORT
-PORT=${PORT:-3001}
+# API_KEY: generate only if missing
+if [ -z "$CURRENT_API_KEY" ]; then
+  API_KEY=$(openssl rand -base64 32)
+  echo -e "${GREEN}Generated API Key: $API_KEY${NC}"
+  echo "Adding API_KEY to .env. Save it securely."
+  set_env_var "API_KEY" "$API_KEY" "$ENV_FILE"
+else
+  echo -e "${GREEN}Preserving existing API_KEY in .env${NC}"
+fi
 
-read -p "Enter NODE_ENV (default production): " NODE_ENV
-NODE_ENV=${NODE_ENV:-production}
+# PORT: set only if missing
+if [ -z "$CURRENT_PORT" ]; then
+  read -p "Enter PORT (default 3001): " PORT
+  PORT=${PORT:-3001}
+  set_env_var "PORT" "$PORT" "$ENV_FILE"
+else
+  echo -e "${GREEN}Preserving existing PORT=$CURRENT_PORT in .env${NC}"
+fi
 
-# Update .env
-set_env_var "PORT" "$PORT" "$ENV_FILE"
-set_env_var "API_KEY" "$API_KEY" "$ENV_FILE"
-set_env_var "NODE_ENV" "$NODE_ENV" "$ENV_FILE"
+# NODE_ENV: set only if missing
+if [ -z "$CURRENT_NODE_ENV" ]; then
+  read -p "Enter NODE_ENV (default production): " NODE_ENV
+  NODE_ENV=${NODE_ENV:-production}
+  set_env_var "NODE_ENV" "$NODE_ENV" "$ENV_FILE"
+else
+  echo -e "${GREEN}Preserving existing NODE_ENV=$CURRENT_NODE_ENV in .env${NC}"
+fi
 
-echo -e "${YELLOW}.env file configured. You can edit $ENV_FILE later if needed.${NC}"
+echo -e "${YELLOW}.env updated without overwriting existing values. Edit $ENV_FILE anytime.${NC}"
 
 # Step 8: Set up systemd service
 if [ ! -f "/etc/systemd/system/n8n-daemon.service" ]; then
