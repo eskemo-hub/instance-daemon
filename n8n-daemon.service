@@ -6,8 +6,8 @@ Requires=docker.service
 
 [Service]
 Type=simple
-User=n8n-daemon
-Group=n8n-daemon
+User=root
+Group=root
 WorkingDirectory=/opt/n8n-daemon/daemon
 ExecStart=/usr/bin/node /opt/n8n-daemon/daemon/dist/index.js
 Restart=on-failure

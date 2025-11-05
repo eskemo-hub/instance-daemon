@@ -195,6 +195,16 @@ if [ ! -f "/etc/systemd/system/n8n-daemon.service" ]; then
   fi
 else
   echo -e "${GREEN}Systemd service already installed.${NC}"
+  # Ensure unit file is up-to-date with repo version
+  if cmp -s "$REPO_DIR/n8n-daemon.service" "/etc/systemd/system/n8n-daemon.service"; then
+    echo -e "${GREEN}Service unit is up to date.${NC}"
+  else
+    echo -e "${YELLOW}Service unit has changed. Updating and restarting...${NC}"
+    cp "$REPO_DIR/n8n-daemon.service" "/etc/systemd/system/n8n-daemon.service"
+    systemctl daemon-reload
+    systemctl restart n8n-daemon || true
+    echo -e "${GREEN}Service unit updated and daemon restarted.${NC}"
+  fi
 fi
 
 echo -e "${GREEN}Installation complete!${NC}"
