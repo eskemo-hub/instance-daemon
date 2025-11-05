@@ -261,6 +261,18 @@ All container endpoints require `x-api-key` header for authentication.
 - `DELETE /api/containers/:id` - Remove container
 - `GET /api/containers/:id/status` - Get container status
 
+### Docker Compose Stack Management (Protected)
+All compose stack endpoints require `x-api-key` header for authentication.
+
+- `POST /api/compose` - Create new Docker Compose stack
+- `POST /api/compose/:stackName/start` - Start compose stack
+- `POST /api/compose/:stackName/stop` - Stop compose stack
+- `POST /api/compose/:stackName/restart` - Restart compose stack
+- `DELETE /api/compose/:stackName` - Remove compose stack (optional `?removeVolumes=true` query param)
+- `GET /api/compose/:stackName/status` - Get compose stack status
+- `GET /api/compose/:stackName/logs` - Get compose stack logs (optional `?lines=N&service=name&follow=true` query params)
+- `GET /api/compose/:stackName/metrics` - Get compose stack resource metrics
+
 ## Security
 
 - All container management endpoints require API key authentication

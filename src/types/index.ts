@@ -49,3 +49,26 @@ export interface ApiError {
   message: string;
   statusCode?: number;
 }
+
+export interface ComposeStackConfig {
+  name: string;
+  composeFile: string;
+  environment?: Record<string, string>;
+  volumeName: string;
+  volumePathTemplate?: string;
+  useTraefik?: boolean;
+  domain?: string;
+  subdomain?: string;
+  publicAccess?: boolean;
+  port: number;
+}
+
+export interface ComposeStackInfo {
+  name: string;
+  status: string;
+  services: Array<{
+    name: string;
+    status: 'running' | 'stopped' | 'error';
+    ready: boolean;
+  }>;
+}
