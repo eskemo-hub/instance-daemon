@@ -81,12 +81,23 @@ export class ComposeStackService {
       fs.writeFileSync(composeFilePath, composeContent, { mode: 0o644 });
 
       // Process environment variables and create .env file if needed
+      // Docker Compose automatically reads .env files from the same directory as the compose file
       if (config.environment && Object.keys(config.environment).length > 0) {
         const envContent = Object.entries(config.environment)
-          .map(([key, value]) => `${key}=${value}`)
+          .map(([key, value]) => {
+            // Escape values that might contain special characters
+            // If value contains spaces, quotes, or special chars, wrap in quotes
+            if (typeof value === 'string' && (value.includes(' ') || value.includes('"') || value.includes('$'))) {
+              // Escape quotes and wrap in quotes
+              const escapedValue = value.replace(/"/g, '\\"');
+              return `${key}="${escapedValue}"`;
+            }
+            return `${key}=${value}`;
+          })
           .join('\n');
         const envFilePath = path.join(stackDir, '.env');
         fs.writeFileSync(envFilePath, envContent, { mode: 0o644 });
+        console.log(`[COMPOSE] Created .env file with ${Object.keys(config.environment).length} variables`);
       }
 
       // Resolve volume path if template is provided
@@ -593,6 +604,54 @@ export class ComposeStackService {
   }
 
   /**
+   * Start a specific service in a stack
+   */
+  async startService(stackName: string, serviceName: string): Promise<void> {
+    try {
+      const stackDir = path.join(this.COMPOSE_DIR, stackName);
+      const composeFilePath = path.join(stackDir, 'docker-compose.yml');
+
+      if (!fs.existsSync(composeFilePath)) {
+        throw new Error(`Compose stack not found: ${stackName}`);
+      }
+
+      const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" start ${serviceName}`;
+      console.log(`[COMPOSE] Starting service ${serviceName} in stack: ${stackName}`);
+
+      execSync(composeCommand, {
+        cwd: stackDir,
+        stdio: 'pipe'
+      });
+    } catch (error) {
+      throw new Error(`Failed to start service ${serviceName}: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Stop a specific service in a stack
+   */
+  async stopService(stackName: string, serviceName: string): Promise<void> {
+    try {
+      const stackDir = path.join(this.COMPOSE_DIR, stackName);
+      const composeFilePath = path.join(stackDir, 'docker-compose.yml');
+
+      if (!fs.existsSync(composeFilePath)) {
+        throw new Error(`Compose stack not found: ${stackName}`);
+      }
+
+      const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" stop ${serviceName}`;
+      console.log(`[COMPOSE] Stopping service ${serviceName} in stack: ${stackName}`);
+
+      execSync(composeCommand, {
+        cwd: stackDir,
+        stdio: 'pipe'
+      });
+    } catch (error) {
+      throw new Error(`Failed to stop service ${serviceName}: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
    * Get list of services in a stack
    */
   async getStackServices(stackName: string): Promise<string[]> {
@@ -706,6 +765,9 @@ export class ComposeStackService {
 
   /**
    * Add environment variables to services in compose file
+   * Note: Docker Compose automatically loads .env files, but we also add them to the service
+   * environment section to ensure they're available. Variables using ${VAR} syntax in the compose
+   * file will be resolved from the .env file automatically.
    */
   private addEnvironmentVariables(composeData: any, envVars: Record<string, string>): any {
     if (!composeData.services) {
@@ -726,9 +788,11 @@ export class ComposeStackService {
         const envObj: Record<string, string> = {};
         for (const env of service.environment) {
           if (typeof env === 'string') {
-            const [key, ...valueParts] = env.split('=');
-            if (key) {
-              envObj[key] = valueParts.join('=');
+            // Handle both KEY=value and KEY=${VAR} formats
+            const match = env.match(/^([^=]+)=(.*)$/);
+            if (match) {
+              const [, key, value] = match;
+              envObj[key] = value;
             }
           }
         }
@@ -736,6 +800,8 @@ export class ComposeStackService {
       }
 
       // Merge environment variables
+      // Use actual values (not ${VAR} syntax) so they're directly available
+      // Docker Compose will still use .env file for ${VAR} interpolation in compose file itself
       service.environment = {
         ...service.environment,
         ...envVars

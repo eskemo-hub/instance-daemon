@@ -265,6 +265,58 @@ composeRoutes.post('/:stackName/services/:serviceName/restart', async (req: Requ
 });
 
 /**
+ * POST /api/compose/:stackName/services/:serviceName/start
+ * Start a specific service in a stack
+ */
+composeRoutes.post('/:stackName/services/:serviceName/start', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { stackName, serviceName } = req.params;
+
+    if (!stackName) {
+      throw new ValidationError('Missing required parameter: stackName');
+    }
+    if (!serviceName) {
+      throw new ValidationError('Missing required parameter: serviceName');
+    }
+
+    await composeStackService.startService(stackName, serviceName);
+    
+    return res.json({
+      success: true,
+      message: `Service ${serviceName} in stack ${stackName} started successfully`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/compose/:stackName/services/:serviceName/stop
+ * Stop a specific service in a stack
+ */
+composeRoutes.post('/:stackName/services/:serviceName/stop', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { stackName, serviceName } = req.params;
+
+    if (!stackName) {
+      throw new ValidationError('Missing required parameter: stackName');
+    }
+    if (!serviceName) {
+      throw new ValidationError('Missing required parameter: serviceName');
+    }
+
+    await composeStackService.stopService(stackName, serviceName);
+    
+    return res.json({
+      success: true,
+      message: `Service ${serviceName} in stack ${stackName} stopped successfully`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * GET /api/compose/:stackName/containers
  * Get list of containers in a stack
  */
