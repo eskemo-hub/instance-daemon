@@ -211,3 +211,22 @@ containerRoutes.get('/:id/metrics', async (req: Request, res: Response, next: Ne
     next(error);
   }
 });
+
+/**
+ * GET /api/containers
+ * List all containers (excluding system containers like traefik)
+ */
+containerRoutes.get('/', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const excludeSystem = req.query.excludeSystem !== 'false';
+    const containers = await dockerService.listAllContainers(excludeSystem);
+    
+    res.status(200).json({
+      success: true,
+      data: containers,
+      count: containers.length
+    });
+  } catch (error) {
+    next(error);
+  }
+});

@@ -867,6 +867,45 @@ export class DockerService {
   }
 
   /**
+   * List all containers (excluding system containers like traefik)
+   * Returns containers that might be orphaned (not tracked in database)
+   */
+  async listAllContainers(excludeSystem: boolean = true): Promise<Array<{
+    id: string;
+    name: string;
+    status: string;
+    image: string;
+    created: number;
+  }>> {
+    return this.retryOperation(async () => {
+      try {
+        const containers = await this.docker.listContainers({ all: true });
+        
+        return containers
+          .filter(container => {
+            if (!excludeSystem) return true;
+            
+            const containerName = container.Names[0]?.replace(/^\//, '') || '';
+            // Exclude system containers
+            const systemContainers = ['traefik', 'haproxy'];
+            return !systemContainers.some(sysName => 
+              containerName.toLowerCase().includes(sysName.toLowerCase())
+            );
+          })
+          .map(container => ({
+            id: container.Id,
+            name: container.Names[0]?.replace(/^\//, '') || 'unknown',
+            status: container.State || 'unknown',
+            image: container.Image || 'unknown',
+            created: container.Created || 0,
+          }));
+      } catch (error) {
+        throw new Error(`Failed to list containers: ${this.getErrorMessage(error)}`);
+      }
+    });
+  }
+
+  /**
    * Extract error message from unknown error type
    */
   private getErrorMessage(error: unknown): string {

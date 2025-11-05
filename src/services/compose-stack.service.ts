@@ -729,23 +729,60 @@ export class ComposeStackService {
       service.labels[`traefik.http.routers.${serviceRouterName}.tls.certresolver`] = 'letsencrypt';
       
       // Determine service port from config or compose file
-      let servicePort: number;
-      if (serviceTraefikConfig?.internalPort) {
-        // Use port from Traefik config
+      // Priority: 1. Traefik config internalPort, 2. Compose file ports, 3. Expose directive, 4. Allocated port (last resort)
+      let servicePort: number | null = null;
+      
+      // First priority: Use port from Traefik config (from template Traefik tab)
+      if (serviceTraefikConfig?.internalPort && serviceTraefikConfig.internalPort > 0) {
         servicePort = serviceTraefikConfig.internalPort;
+        console.log(`[COMPOSE] Using Traefik config port ${servicePort} for service ${serviceName}`);
       } else {
-        // Fallback: try to detect from compose file ports
-        servicePort = port; // Default to main port
+        // Second priority: Try to detect from compose file ports
         if (service.ports && Array.isArray(service.ports) && service.ports.length > 0) {
           const portMapping = service.ports[0];
           if (typeof portMapping === 'string') {
-            const match = portMapping.match(/:(\d+)/);
-            if (match) {
-              servicePort = parseInt(match[1]);
+            // Format: "8000:80" (host:container) or "80" (container only)
+            const parts = portMapping.split(':');
+            if (parts.length === 2) {
+              // Has host port mapping - use container port (right side)
+              const containerPort = parseInt(parts[1]);
+              if (!isNaN(containerPort) && containerPort > 0) {
+                servicePort = containerPort;
+                console.log(`[COMPOSE] Detected container port ${servicePort} from compose file for service ${serviceName}`);
+              }
+            } else if (parts.length === 1) {
+              // Single port - container port
+              const containerPort = parseInt(parts[0]);
+              if (!isNaN(containerPort) && containerPort > 0) {
+                servicePort = containerPort;
+                console.log(`[COMPOSE] Detected single port ${servicePort} from compose file for service ${serviceName}`);
+              }
             }
-          } else if (typeof portMapping === 'object' && portMapping.target) {
-            servicePort = portMapping.target;
+          } else if (typeof portMapping === 'object') {
+            // Format: { target: 80, published: 8000, protocol: 'tcp' }
+            if (portMapping.target && portMapping.target > 0) {
+              servicePort = portMapping.target;
+              console.log(`[COMPOSE] Detected target port ${servicePort} from compose file for service ${serviceName}`);
+            } else if (portMapping.container && portMapping.container > 0) {
+              servicePort = portMapping.container;
+              console.log(`[COMPOSE] Detected container port ${servicePort} from compose file for service ${serviceName}`);
+            }
           }
+        }
+        
+        // Third priority: Check expose directive
+        if (servicePort === null && service.expose && Array.isArray(service.expose) && service.expose.length > 0) {
+          const exposedPort = parseInt(service.expose[0]);
+          if (!isNaN(exposedPort) && exposedPort > 0) {
+            servicePort = exposedPort;
+            console.log(`[COMPOSE] Using exposed port ${servicePort} for service ${serviceName}`);
+          }
+        }
+        
+        // Last resort: Use allocated port (should rarely happen if compose file is properly configured)
+        if (servicePort === null || servicePort <= 0) {
+          servicePort = port;
+          console.warn(`[COMPOSE] WARNING: No valid port found for service ${serviceName}, falling back to allocated port ${port}. Consider configuring the service in the Traefik tab or adding ports to the compose file.`);
         }
       }
       
