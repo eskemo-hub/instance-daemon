@@ -6,8 +6,8 @@ Requires=docker.service
 
 [Service]
 Type=simple
-User=daemon
-Group=daemon
+User=n8n-daemon
+Group=n8n-daemon
 WorkingDirectory=/opt/n8n-daemon/daemon
 ExecStart=/usr/bin/node /opt/n8n-daemon/daemon/dist/index.js
 Restart=on-failure
@@ -20,8 +20,8 @@ SyslogIdentifier=n8n-daemon
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/n8n-daemon /mnt/data
+ProtectHome=false
+ReadWritePaths=/opt/n8n-daemon
 
 # Environment
 Environment=NODE_ENV=production
