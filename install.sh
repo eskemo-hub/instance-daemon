@@ -32,6 +32,21 @@ prompt_yes_no() {
   done
 }
 
+# Safely set or update a key=value in an .env file
+set_env_var() {
+  local key="$1"
+  local value="$2"
+  local file="$3"
+  # Escape sed replacement special chars: & and the chosen delimiter |
+  local escaped_value
+  escaped_value=$(printf '%s' "$value" | sed 's/[&|]/\\&/g')
+  if grep -q "^${key}=" "$file"; then
+    sed -i -E "s|^${key}=.*$|${key}=${escaped_value}|" "$file"
+  else
+    echo "${key}=${value}" >> "$file"
+  fi
+}
+
 # Step 1: Update system and install basics
 echo -e "${GREEN}Updating system packages...${NC}"
 apt update && apt upgrade -y
@@ -161,9 +176,9 @@ read -p "Enter NODE_ENV (default production): " NODE_ENV
 NODE_ENV=${NODE_ENV:-production}
 
 # Update .env
-sed -i "s/^PORT=.*/PORT=$PORT/" $ENV_FILE
-sed -i "s/^API_KEY=.*/API_KEY=$API_KEY/" $ENV_FILE
-sed -i "s/^NODE_ENV=.*/NODE_ENV=$NODE_ENV/" $ENV_FILE
+set_env_var "PORT" "$PORT" "$ENV_FILE"
+set_env_var "API_KEY" "$API_KEY" "$ENV_FILE"
+set_env_var "NODE_ENV" "$NODE_ENV" "$ENV_FILE"
 
 echo -e "${YELLOW}.env file configured. You can edit $ENV_FILE later if needed.${NC}"
 
