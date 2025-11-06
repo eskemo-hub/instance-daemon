@@ -120,16 +120,67 @@ else
   echo -e "${GREEN}Docker is already installed.${NC}"
 fi
 
-# Optional: Install and configure HAProxy for database proxying
+# Optional: Install HAProxy for database proxying
+# Note: The daemon will automatically manage HAProxy configuration
+# Only install HAProxy here; don't create config (daemon handles it)
 if command -v haproxy >/dev/null 2>&1; then
-  echo -e "${GREEN}HAProxy is already installed. Skipping installation and config prompt.${NC}"
+  echo -e "${GREEN}HAProxy is already installed.${NC}"
+  echo -e "${YELLOW}Note: HAProxy configuration is managed by the daemon.${NC}"
+  echo -e "${YELLOW}The daemon will automatically configure HAProxy when databases are created.${NC}"
 else
-  if prompt_yes_no "Install and configure HAProxy for database proxying?"; then
+  if prompt_yes_no "Install HAProxy for database proxying? (Config will be managed by daemon)"; then
     echo -e "${GREEN}Installing HAProxy...${NC}"
     apt install -y haproxy
+    
+    # Create minimal config to allow HAProxy to start
+    # The daemon will overwrite this with proper config when databases are created
+    echo -e "${GREEN}Creating minimal HAProxy config (daemon will manage full config)...${NC}"
+    mkdir -p /etc/haproxy
+    cat >/etc/haproxy/haproxy.cfg <<EOF
+# HAProxy Configuration
+# This is a minimal config. The n8n-daemon will automatically manage
+# the full configuration when databases are created.
 
-    # Offer to generate a minimal TCP pass-through config
-    if prompt_yes_no "Generate HAProxy config for database proxying now?"; then
+global
+    daemon
+    maxconn 4096
+    user haproxy
+    group haproxy
+
+defaults
+    mode    tcp
+    timeout connect 10s
+    timeout client  1m
+    timeout server  1m
+
+# Stats page for monitoring
+listen stats
+    bind *:8404
+    mode http
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+    stats admin if TRUE
+EOF
+    
+    # Validate and start HAProxy
+    if haproxy -c -f /etc/haproxy/haproxy.cfg; then
+      systemctl enable haproxy
+      systemctl start haproxy
+      echo -e "${GREEN}HAProxy installed and started.${NC}"
+      echo -e "${YELLOW}The daemon will automatically configure database routing when databases are created.${NC}"
+    else
+      echo -e "${RED}HAProxy config validation failed.${NC}"
+    fi
+    
+    # Skip the old config generation prompt
+    SKIP_CONFIG_GEN=true
+  fi
+fi
+
+# Legacy config generation (kept for backward compatibility, but not recommended)
+if [ -z "$SKIP_CONFIG_GEN" ] && [ -f "/etc/haproxy/haproxy.cfg" ]; then
+  if prompt_yes_no "Generate custom HAProxy config? (WARNING: This will be overwritten by daemon)"; then
       read -p "Database type (postgres/mysql) [postgres]: " DB_TYPE
       DB_TYPE=${DB_TYPE:-postgres}
       if [ "$DB_TYPE" = "mysql" ]; then DEFAULT_PORT=3306; else DEFAULT_PORT=5432; fi
