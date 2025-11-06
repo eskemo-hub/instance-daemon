@@ -213,10 +213,15 @@ defaults
         const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
         config += `    default_backend ${backendName}\n`;
       } else if (postgresBackends.length > 1) {
-        // Multiple backends: non-TLS connections will fail without SNI
-        // Log a warning but don't set default (forces TLS/SNI requirement)
-        config += `    # Multiple backends require TLS with SNI for routing\n`;
-        config += `    # Non-TLS connections will be rejected\n`;
+        // Multiple backends: Use first backend as default for non-TLS connections
+        // TLS connections will still route via SNI, non-TLS will go to first backend
+        // Note: This means non-TLS connections can't distinguish between databases
+        // For proper multi-database routing, clients should use TLS with SNI
+        const defaultBackend = postgresBackends[0];
+        const defaultBackendName = `postgres_${defaultBackend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+        config += `    default_backend ${defaultBackendName}\n`;
+        config += `    # Note: Non-TLS connections route to first backend (${defaultBackend.domain})\n`;
+        config += `    # For proper routing, use TLS with SNI matching the domain\n`;
       }
       config += `\n`;
     }
@@ -243,9 +248,11 @@ defaults
         const backendName = `mysql_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
         config += `    default_backend ${backendName}\n`;
       } else if (mysqlBackends.length > 1) {
-        // Multiple backends: non-TLS connections will fail without SNI
-        config += `    # Multiple backends require TLS with SNI for routing\n`;
-        config += `    # Non-TLS connections will be rejected\n`;
+        // Multiple backends: Use first backend as default for non-TLS connections
+        const defaultBackend = mysqlBackends[0];
+        const defaultBackendName = `mysql_${defaultBackend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+        config += `    default_backend ${defaultBackendName}\n`;
+        config += `    # Note: Non-TLS connections route to first backend (${defaultBackend.domain})\n`;
       }
       config += `\n`;
     }
