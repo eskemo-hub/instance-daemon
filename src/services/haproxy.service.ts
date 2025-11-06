@@ -1,6 +1,7 @@
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import logger from '../utils/logger';
 
 interface DatabaseBackend {
   instanceName: string;
@@ -18,7 +19,9 @@ interface DatabaseBackend {
 export class HAProxyService {
   private readonly CONFIG_DIR = path.join(process.cwd(), 'haproxy');
   private readonly HAPROXY_CONFIG = path.join(this.CONFIG_DIR, 'haproxy.cfg');
-  private readonly HAPROXY_SYSTEM_CONFIG = '/etc/haproxy/haproxy.cfg';
+  // Use writable location instead of /etc/haproxy (which might be read-only)
+  private readonly HAPROXY_SYSTEM_CONFIG = '/opt/n8n-daemon/haproxy/haproxy.cfg';
+  private readonly HAPROXY_SYSTEM_DIR = '/opt/n8n-daemon/haproxy';
   private readonly BACKENDS_FILE = path.join(this.CONFIG_DIR, 'backends.json');
 
   constructor() {
@@ -127,18 +130,28 @@ export class HAProxyService {
     // Write config locally first
     fs.writeFileSync(this.HAPROXY_CONFIG, config, { mode: 0o644 });
     
-    // Write directly to system HAProxy config location
-    // HAProxy systemd service reads from /etc/haproxy/haproxy.cfg by default
+    // Write to writable location (/opt/n8n-daemon/haproxy/haproxy.cfg)
+    // We'll configure HAProxy systemd service to use this location
     try {
-      // Ensure /etc/haproxy directory exists
-      execSync(`sudo mkdir -p /etc/haproxy`, { stdio: 'pipe' });
+      // Ensure directory exists
+      if (!fs.existsSync(this.HAPROXY_SYSTEM_DIR)) {
+        fs.mkdirSync(this.HAPROXY_SYSTEM_DIR, { recursive: true, mode: 0o755 });
+      }
       
-      // Copy config to system location (/etc/haproxy/haproxy.cfg)
-      execSync(`sudo cp ${this.HAPROXY_CONFIG} ${this.HAPROXY_SYSTEM_CONFIG}`, { stdio: 'pipe' });
+      // Copy config to system location
+      fs.copyFileSync(this.HAPROXY_CONFIG, this.HAPROXY_SYSTEM_CONFIG);
       
       // Set proper permissions
-      execSync(`sudo chown haproxy:haproxy ${this.HAPROXY_SYSTEM_CONFIG}`, { stdio: 'pipe' });
-      execSync(`sudo chmod 644 ${this.HAPROXY_SYSTEM_CONFIG}`, { stdio: 'pipe' });
+      fs.chmodSync(this.HAPROXY_SYSTEM_CONFIG, 0o644);
+      try {
+        execSync(`sudo chown haproxy:haproxy ${this.HAPROXY_SYSTEM_CONFIG}`, { stdio: 'pipe' });
+      } catch {
+        // If chown fails, that's okay - file is still readable
+        logger.warn('Could not change ownership of HAProxy config (may need sudo)');
+      }
+      
+      // Configure HAProxy systemd service to use our config location
+      await this.configureSystemdService();
     } catch (error) {
       throw new Error(`Failed to deploy HAProxy configuration: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -279,12 +292,41 @@ defaults
   }
 
   /**
+   * Configure HAProxy systemd service to use our config location
+   */
+  private async configureSystemdService(): Promise<void> {
+    const systemdOverrideDir = '/etc/systemd/system/haproxy.service.d';
+    const overrideFile = path.join(systemdOverrideDir, 'override.conf');
+    
+    try {
+      // Create override directory
+      execSync(`sudo mkdir -p ${systemdOverrideDir}`, { stdio: 'pipe' });
+      
+      // Create override file to point to our config
+      const overrideContent = `[Service]
+ExecStart=
+ExecStart=/usr/sbin/haproxy -Ws -f ${this.HAPROXY_SYSTEM_CONFIG} -p /run/haproxy.pid $EXTRAOPTS
+`;
+      
+      fs.writeFileSync(overrideFile, overrideContent);
+      execSync(`sudo chmod 644 ${overrideFile}`, { stdio: 'pipe' });
+      
+      // Reload systemd to pick up changes
+      execSync('sudo systemctl daemon-reload', { stdio: 'pipe' });
+      
+      logger.info('HAProxy systemd service configured to use custom config location');
+    } catch (error) {
+      logger.warn(`Could not configure systemd override: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Continue anyway - user can manually configure if needed
+    }
+  }
+
+  /**
    * Reload HAProxy configuration
    */
   private async reloadHAProxy(): Promise<void> {
     try {
-      // Test configuration first using the system config location
-      // HAProxy systemd service reads from /etc/haproxy/haproxy.cfg by default
+      // Test configuration first using our config location
       execSync(`sudo haproxy -c -f ${this.HAPROXY_SYSTEM_CONFIG}`, { stdio: 'pipe' });
       
       // Reload if valid
@@ -292,7 +334,7 @@ defaults
     } catch (error) {
       // If reload fails, try restart
       try {
-        console.warn('HAProxy reload failed, attempting restart...');
+        logger.warn('HAProxy reload failed, attempting restart...');
         execSync('sudo systemctl restart haproxy', { stdio: 'pipe' });
       } catch (restartError) {
         throw new Error(`Failed to reload/restart HAProxy: ${error instanceof Error ? error.message : 'Unknown error'}`);
