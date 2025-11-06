@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import logger from '../utils/logger';
 
 /**
  * Custom error classes
@@ -34,16 +35,13 @@ export class DockerError extends Error {
  * Log error with context
  */
 function logError(error: Error, req: Request): void {
-  const timestamp = new Date().toISOString();
-  const method = req.method;
-  const path = req.path;
-  
-  console.error(`[${timestamp}] [ERROR] ${method} ${path}`);
-  console.error('Error:', error.message);
-  
-  if (process.env.NODE_ENV === 'development' && error.stack) {
-    console.error('Stack:', error.stack);
-  }
+  logger.error({
+    method: req.method,
+    path: req.path,
+    error: error.message,
+    stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+    statusCode: 'statusCode' in error ? (error as { statusCode?: number }).statusCode : undefined
+  }, 'Request error');
 }
 
 /**

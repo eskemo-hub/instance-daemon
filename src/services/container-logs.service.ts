@@ -1,4 +1,6 @@
 import Docker from 'dockerode';
+import logger from '../utils/logger';
+import { dockerManager } from '../utils/docker-manager';
 
 /**
  * ContainerLogsService handles Docker container log retrieval
@@ -11,10 +13,11 @@ export interface LogEntry {
 }
 
 export class ContainerLogsService {
-  private docker: Docker;
-
-  constructor() {
-    this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
+  /**
+   * Get Docker instance from manager
+   */
+  private getDocker(): Docker {
+    return dockerManager.getDocker();
   }
 
   /**
@@ -29,7 +32,7 @@ export class ContainerLogsService {
     } = {}
   ): Promise<string> {
     try {
-      const container = this.docker.getContainer(containerId);
+      const container = this.getDocker().getContainer(containerId);
 
       const logBuffer = await container.logs({
         stdout: true,

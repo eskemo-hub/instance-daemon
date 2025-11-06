@@ -4,7 +4,9 @@ import { CertificateService } from './certificate.service';
 import { HAProxyService } from './haproxy.service';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import logger from '../utils/logger';
+import { dockerManager } from '../utils/docker-manager';
+import { execCommand } from '../utils/exec-async';
 
 /**
  * DockerService handles all Docker container operations
@@ -22,17 +24,21 @@ import { execSync } from 'child_process';
  * - 15.4: Daemon SHALL ensure n8n containers are configured to accept connections on their assigned ports
  */
 export class DockerService {
-  private docker: Docker;
   private certificateService: CertificateService;
   private haproxyService: HAProxyService;
   private readonly MAX_RETRIES = 3;
   private readonly RETRY_DELAY = 1000; // 1 second
 
   constructor() {
-    // Initialize dockerode with default socket connection
-    this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
     this.certificateService = new CertificateService();
     this.haproxyService = new HAProxyService();
+  }
+
+  /**
+   * Get Docker instance from manager
+   */
+  private getDocker(): Docker {
+    return dockerManager.getDocker();
   }
 
   /**
@@ -54,23 +60,23 @@ export class DockerService {
           try {
             const hostDir = path.resolve(config.hostPath);
             if (!fs.existsSync(hostDir)) {
-              console.log(`Creating host directory: ${hostDir}`);
+              logger.debug({ dir: hostDir }, 'Creating host directory');
               fs.mkdirSync(hostDir, { recursive: true, mode: 0o755 });
               
               // Set proper ownership if running as root (common in daemon environments)
               try {
                 // Try to set ownership to 1000:1000 (common Docker user)
-                execSync(`chown -R 1000:1000 "${hostDir}"`, { stdio: 'ignore' });
-                console.log(`Set ownership of ${hostDir} to 1000:1000`);
+                await execCommand(`chown -R 1000:1000 "${hostDir}"`, { stdio: 'ignore' as const });
+                logger.debug({ dir: hostDir }, 'Set ownership to 1000:1000');
               } catch (chownError) {
-                console.warn(`Could not set ownership for ${hostDir}:`, chownError);
+                logger.warn({ dir: hostDir, error: this.getErrorMessage(chownError) }, 'Could not set ownership');
                 // Continue anyway - the directory was created with proper mode
               }
             } else {
-              console.log(`Host directory already exists: ${hostDir}`);
+              logger.debug({ dir: hostDir }, 'Host directory already exists');
             }
           } catch (error) {
-            console.error(`Failed to create host directory ${config.hostPath}:`, error);
+            logger.error({ dir: config.hostPath, error: this.getErrorMessage(error) }, 'Failed to create host directory');
             throw new Error(`Failed to create host directory: ${error}`);
           }
           
@@ -179,7 +185,7 @@ export class DockerService {
               HostPort: config.port.toString() 
             }]
           };
-          console.log(`[DOCKER] Creating stack service ${config.name} with internal networking (localhost:${config.port})`);
+          logger.info({ name: config.name, port: config.port }, 'Creating stack service with internal networking');
         } else {
           // Direct mode: bind to host port
           // Databases: localhost only (must use HAProxy)
@@ -194,7 +200,7 @@ export class DockerService {
         }
 
         // Create container with volume mounted (Requirement 14.2)
-        const container = await this.docker.createContainer(containerConfig);
+        const container = await this.getDocker().createContainer(containerConfig);
 
         const containerInfo = await container.inspect();
 
@@ -234,7 +240,7 @@ export class DockerService {
   async startContainer(containerId: string): Promise<void> {
     return this.retryOperation(async () => {
       try {
-        const container = this.docker.getContainer(containerId);
+        const container = this.getDocker().getContainer(containerId);
         await container.start();
       } catch (error) {
         // If container is already running, don't throw error
@@ -253,7 +259,7 @@ export class DockerService {
   async stopContainer(containerId: string): Promise<void> {
     return this.retryOperation(async () => {
       try {
-        const container = this.docker.getContainer(containerId);
+        const container = this.getDocker().getContainer(containerId);
         await container.stop({ t: 10 }); // 10 second graceful shutdown
       } catch (error) {
         // If container is already stopped, don't throw error
@@ -273,7 +279,7 @@ export class DockerService {
   async restartContainer(containerId: string): Promise<void> {
     return this.retryOperation(async () => {
       try {
-        const container = this.docker.getContainer(containerId);
+        const container = this.getDocker().getContainer(containerId);
         await container.restart({ t: 10 }); // 10 second graceful shutdown before restart
       } catch (error) {
         throw new Error(`Failed to restart container: ${this.getErrorMessage(error)}`);
@@ -288,7 +294,7 @@ export class DockerService {
   async removeContainer(containerId: string, removeVolumes: boolean = true): Promise<void> {
     return this.retryOperation(async () => {
       try {
-        const container = this.docker.getContainer(containerId);
+        const container = this.getDocker().getContainer(containerId);
         
         // Get container info to find associated volumes and bind mounts
         const containerInfo = await container.inspect();
@@ -313,11 +319,11 @@ export class DockerService {
         if (removeVolumes) {
           for (const volumeName of volumeNames) {
             try {
-              const volume = this.docker.getVolume(volumeName);
+              const volume = this.getDocker().getVolume(volumeName);
               await volume.remove();
-              console.log(`Removed Docker volume: ${volumeName}`);
+              logger.info({ volumeName }, 'Removed Docker volume');
             } catch (error) {
-              console.error(`Failed to remove volume ${volumeName}:`, this.getErrorMessage(error));
+              logger.error({ volumeName, error: this.getErrorMessage(error) }, 'Failed to remove volume');
               // Continue with other volumes even if one fails
             }
           }
@@ -326,12 +332,12 @@ export class DockerService {
           for (const bindMountPath of bindMountPaths) {
             try {
               if (fs.existsSync(bindMountPath)) {
-                // Use execSync to remove directory with proper permissions
-                execSync(`rm -rf "${bindMountPath}"`, { stdio: 'ignore' });
-                console.log(`Removed bind mount directory: ${bindMountPath}`);
+                // Use execCommand to remove directory with proper permissions
+                await execCommand(`rm -rf "${bindMountPath}"`, { stdio: 'ignore' as const });
+                logger.info({ path: bindMountPath }, 'Removed bind mount directory');
               }
             } catch (error) {
-              console.error(`Failed to remove bind mount directory ${bindMountPath}:`, this.getErrorMessage(error));
+              logger.error({ path: bindMountPath, error: this.getErrorMessage(error) }, 'Failed to remove bind mount directory');
               // Continue with other directories even if one fails
             }
           }
@@ -342,7 +348,7 @@ export class DockerService {
         try {
           await this.certificateService.removeCertificate(containerName);
         } catch (error) {
-          console.error(`Failed to remove certificates for ${containerName}:`, this.getErrorMessage(error));
+          logger.error({ containerName, error: this.getErrorMessage(error) }, 'Failed to remove certificates');
         }
 
         // Remove HAProxy routing if it's a database
@@ -354,9 +360,9 @@ export class DockerService {
           
           try {
             await this.haproxyService.removeDatabaseBackend(containerName, dbType);
-            console.log(`HAProxy routing removed for ${containerName}`);
+            logger.info({ containerName }, 'HAProxy routing removed');
           } catch (error) {
-            console.error(`Failed to remove HAProxy routing for ${containerName}:`, error);
+            logger.error({ containerName, error: this.getErrorMessage(error) }, 'Failed to remove HAProxy routing');
           }
         }
       } catch (error) {
@@ -371,7 +377,7 @@ export class DockerService {
    */
   async getContainerStatus(containerId: string): Promise<ContainerStatus> {
     try {
-      const container = this.docker.getContainer(containerId);
+      const container = this.getDocker().getContainer(containerId);
       const containerInfo = await container.inspect();
 
       const state = this.mapContainerState(containerInfo.State);
@@ -402,7 +408,7 @@ export class DockerService {
    */
   private async createVolume(volumeName: string): Promise<void> {
     try {
-      await this.docker.createVolume({
+      await this.getDocker().createVolume({
         Name: volumeName,
         Driver: 'local'
       });
@@ -420,18 +426,18 @@ export class DockerService {
   private async pullImageIfNeeded(imageName: string): Promise<void> {
     try {
       // Check if image exists
-      await this.docker.getImage(imageName).inspect();
+      await this.getDocker().getImage(imageName).inspect();
     } catch (error) {
       // Image doesn't exist, pull it
-      console.log(`Pulling image ${imageName}...`);
+      logger.info({ imageName }, 'Pulling image');
       await new Promise((resolve, reject) => {
-        this.docker.pull(imageName, (err: Error, stream: NodeJS.ReadableStream) => {
+        this.getDocker().pull(imageName, (err: Error, stream: NodeJS.ReadableStream) => {
           if (err) {
             reject(err);
             return;
           }
           
-          this.docker.modem.followProgress(stream, (err: Error | null) => {
+          this.getDocker().modem.followProgress(stream, (err: Error | null) => {
             if (err) {
               reject(err);
             } else {
@@ -556,7 +562,7 @@ export class DockerService {
         
         if (attempt < retries - 1) {
           const delay = this.RETRY_DELAY * Math.pow(2, attempt); // Exponential backoff
-          console.log(`Operation failed, retrying in ${delay}ms... (attempt ${attempt + 1}/${retries})`);
+          logger.warn({ attempt: attempt + 1, retries, delay }, 'Operation failed, retrying');
           await this.sleep(delay);
         }
       }
@@ -577,7 +583,7 @@ export class DockerService {
    */
   async getContainerLogs(containerId: string, options: { lines?: number; follow?: boolean } = {}): Promise<string[]> {
     try {
-      const container = this.docker.getContainer(containerId);
+      const container = this.getDocker().getContainer(containerId);
       
       // Use callback approach to get proper buffer
       return new Promise((resolve, reject) => {
@@ -630,7 +636,7 @@ export class DockerService {
     pids: number;
   }> {
     try {
-      const container = this.docker.getContainer(containerId);
+      const container = this.getDocker().getContainer(containerId);
       
       // Get container info to check for configured limits
       const containerInfo = await container.inspect();
@@ -706,13 +712,12 @@ export class DockerService {
       
       // Debug logging for block I/O (temporary)
       if (blockRead === 0 && blockWrite === 0) {
-        console.log('Block I/O Debug for container:', containerId);
-        console.log('blkio_stats keys:', Object.keys(stats.blkio_stats || {}));
+        logger.debug({ containerId, blkioKeys: Object.keys(stats.blkio_stats || {}) }, 'Block I/O Debug for container');
         if (stats.blkio_stats?.io_service_bytes_recursive) {
-          console.log('io_service_bytes_recursive:', stats.blkio_stats.io_service_bytes_recursive.slice(0, 5));
+          logger.debug({ containerId, sample: stats.blkio_stats.io_service_bytes_recursive.slice(0, 5) }, 'io_service_bytes_recursive sample');
         }
         if (stats.blkio_stats?.io_serviced_recursive) {
-          console.log('io_serviced_recursive:', stats.blkio_stats.io_serviced_recursive.slice(0, 5));
+          logger.debug({ containerId, sample: stats.blkio_stats.io_serviced_recursive.slice(0, 5) }, 'io_serviced_recursive sample');
         }
       }
 
@@ -797,7 +802,7 @@ export class DockerService {
       const cpuQuota = Math.round(config.cpuLimit * cpuPeriod);
       hostConfig.CpuQuota = cpuQuota;
       hostConfig.CpuPeriod = cpuPeriod;
-      console.log(`[DOCKER] Applying CPU limit: ${config.cpuLimit} cores (quota: ${cpuQuota}, period: ${cpuPeriod})`);
+      logger.debug({ cpuLimit: config.cpuLimit, quota: cpuQuota, period: cpuPeriod }, 'Applying CPU limit');
     }
 
     // Apply memory limit
@@ -805,7 +810,7 @@ export class DockerService {
       const memoryBytes = this.parseMemoryLimit(config.memoryLimit);
       if (memoryBytes > 0) {
         hostConfig.Memory = memoryBytes;
-        console.log(`[DOCKER] Applying memory limit: ${config.memoryLimit} (${memoryBytes} bytes)`);
+        logger.debug({ memoryLimit: config.memoryLimit, bytes: memoryBytes }, 'Applying memory limit');
       }
     }
 
@@ -814,7 +819,7 @@ export class DockerService {
       const memoryReservationBytes = this.parseMemoryLimit(config.memoryReservation);
       if (memoryReservationBytes > 0) {
         hostConfig.MemoryReservation = memoryReservationBytes;
-        console.log(`[DOCKER] Applying memory reservation: ${config.memoryReservation} (${memoryReservationBytes} bytes)`);
+        logger.debug({ memoryReservation: config.memoryReservation, bytes: memoryReservationBytes }, 'Applying memory reservation');
       }
     }
 
@@ -822,7 +827,7 @@ export class DockerService {
     // They would need to be enforced at the volume/filesystem level or through quotas
     // We store it for monitoring/validation purposes but don't apply it here
     if (config.storageLimit) {
-      console.log(`[DOCKER] Storage limit specified: ${config.storageLimit} (not applied at container level)`);
+      logger.debug({ storageLimit: config.storageLimit }, 'Storage limit specified (not applied at container level)');
     }
   }
 
@@ -879,7 +884,7 @@ export class DockerService {
   }>> {
     return this.retryOperation(async () => {
       try {
-        const containers = await this.docker.listContainers({ all: true });
+        const containers = await this.getDocker().listContainers({ all: true });
         
         return containers
           .filter(container => {
@@ -926,7 +931,7 @@ export class DockerService {
   }>> {
     return this.retryOperation(async () => {
       try {
-        const volumes = await this.docker.listVolumes();
+        const volumes = await this.getDocker().listVolumes();
         return volumes.Volumes.map(volume => ({
           name: volume.Name,
           driver: volume.Driver,
@@ -945,9 +950,9 @@ export class DockerService {
   async removeVolume(volumeName: string): Promise<void> {
     return this.retryOperation(async () => {
       try {
-        const volume = this.docker.getVolume(volumeName);
+        const volume = this.getDocker().getVolume(volumeName);
         await volume.remove();
-        console.log(`[DOCKER] Removed volume: ${volumeName}`);
+        logger.info({ volumeName }, 'Removed volume');
       } catch (error) {
         const errorMessage = this.getErrorMessage(error);
         
@@ -987,8 +992,8 @@ export class DockerService {
   }>> {
     return this.retryOperation(async () => {
       try {
-        const images = await this.docker.listImages({ all: true, filters: { dangling: ['false'] } });
-        const containers = await this.docker.listContainers({ all: true });
+        const images = await this.getDocker().listImages({ all: true, filters: { dangling: ['false'] } });
+        const containers = await this.getDocker().listContainers({ all: true });
         
         // Get all images in use by containers
         const imagesInUse = new Set<string>();
@@ -1043,7 +1048,7 @@ export class DockerService {
           pruneFilters.label = options.filters.label;
         }
 
-        const result = await this.docker.pruneImages({ filters: pruneFilters });
+        const result = await this.getDocker().pruneImages({ filters: pruneFilters });
         
         return {
           imagesDeleted: result.ImagesDeleted?.map((img: any) => img.Deleted || img.Untagged || '').filter(Boolean) || [],
@@ -1065,7 +1070,7 @@ export class DockerService {
   }> {
     return this.retryOperation(async () => {
       try {
-        const result = await this.docker.pruneVolumes({});
+        const result = await this.getDocker().pruneVolumes({});
         
         return {
           volumesDeleted: result.VolumesDeleted || [],

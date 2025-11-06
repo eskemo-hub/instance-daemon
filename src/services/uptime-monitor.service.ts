@@ -1,5 +1,7 @@
 import axios from 'axios';
 import Docker from 'dockerode';
+import logger from '../utils/logger';
+import { dockerManager } from '../utils/docker-manager';
 
 /**
  * UptimeMonitorService - Monitors instance uptime and health
@@ -15,15 +17,20 @@ export interface UptimeCheck {
 }
 
 export class UptimeMonitorService {
-    private docker: Docker;
     private platformUrl: string;
     private apiKey: string;
     private monitorInterval: NodeJS.Timeout | null = null;
 
     constructor() {
-        this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
         this.platformUrl = process.env.PLATFORM_URL || 'http://localhost:3000';
         this.apiKey = process.env.PLATFORM_API_KEY || '';
+    }
+
+    /**
+     * Get Docker instance from manager
+     */
+    private getDocker(): Docker {
+        return dockerManager.getDocker();
     }
 
     /**
@@ -31,11 +38,11 @@ export class UptimeMonitorService {
      */
     start(intervalSeconds: number = 30) {
         if (this.monitorInterval) {
-            console.log('Uptime monitor already running');
+            logger.info('Uptime monitor already running');
             return;
         }
 
-        console.log(`Starting uptime monitor (interval: ${intervalSeconds}s)`);
+        logger.info({ intervalSeconds }, 'Starting uptime monitor');
         
         // Check immediately
         this.checkUptime();
@@ -53,7 +60,7 @@ export class UptimeMonitorService {
         if (this.monitorInterval) {
             clearInterval(this.monitorInterval);
             this.monitorInterval = null;
-            console.log('Uptime monitor stopped');
+            logger.info('Uptime monitor stopped');
         }
     }
 
@@ -62,7 +69,7 @@ export class UptimeMonitorService {
      */
     private async checkUptime() {
         try {
-            const containers = await this.docker.listContainers({ all: true });
+            const containers = await this.getDocker().listContainers({ all: true });
             const n8nContainers = containers.filter(c => c.Image.includes('n8n'));
 
             const checks: UptimeCheck[] = [];
@@ -76,7 +83,7 @@ export class UptimeMonitorService {
             await this.sendUptimeDataToPlatform(checks);
 
         } catch (error) {
-            console.error('Error checking uptime:', error);
+            logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Error checking uptime');
         }
     }
 
@@ -89,7 +96,7 @@ export class UptimeMonitorService {
         const startTime = Date.now();
 
         try {
-            const container = this.docker.getContainer(containerId);
+            const container = this.getDocker().getContainer(containerId);
             const info = await container.inspect();
 
             // Check if container is running
@@ -163,7 +170,7 @@ export class UptimeMonitorService {
                 }
             );
         } catch (error) {
-            console.error('Error sending uptime data to platform:', error);
+            logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Error sending uptime data to platform');
         }
     }
 }

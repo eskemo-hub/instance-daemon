@@ -1,4 +1,6 @@
 import Docker from 'dockerode';
+import logger from '../utils/logger';
+import { dockerManager } from '../utils/docker-manager';
 
 /**
  * TraefikService handles Traefik reverse proxy management
@@ -9,12 +11,14 @@ import Docker from 'dockerode';
  * - Domain-based routing
  */
 export class TraefikService {
-  private docker: Docker;
   private readonly TRAEFIK_CONTAINER_NAME = 'traefik';
   private readonly TRAEFIK_NETWORK_NAME = 'traefik-network';
 
-  constructor() {
-    this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
+  /**
+   * Get Docker instance from manager
+   */
+  private getDocker(): Docker {
+    return dockerManager.getDocker();
   }
 
   /**
@@ -22,7 +26,7 @@ export class TraefikService {
    */
   async isTraefikRunning(): Promise<boolean> {
     try {
-      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const container = this.getDocker().getContainer(this.TRAEFIK_CONTAINER_NAME);
       const info = await container.inspect();
       return info.State.Running;
     } catch (error) {
@@ -60,12 +64,12 @@ export class TraefikService {
    */
   private async createTraefikNetwork(): Promise<void> {
     try {
-      const networks = await this.docker.listNetworks({
+      const networks = await this.getDocker().listNetworks({
         filters: { name: [this.TRAEFIK_NETWORK_NAME] }
       });
 
       if (networks.length === 0) {
-        await this.docker.createNetwork({
+        await this.getDocker().createNetwork({
           Name: this.TRAEFIK_NETWORK_NAME,
           Driver: 'bridge',
         });
@@ -83,13 +87,13 @@ export class TraefikService {
     try {
       console.log('Pulling Traefik image...');
       await new Promise((resolve, reject) => {
-        this.docker.pull('traefik:v2.10', (err: Error, stream: NodeJS.ReadableStream) => {
+        this.getDocker().pull('traefik:v2.10', (err: Error, stream: NodeJS.ReadableStream) => {
           if (err) {
             reject(err);
             return;
           }
           
-          this.docker.modem.followProgress(stream, (err: Error | null) => {
+          this.getDocker().modem.followProgress(stream, (err: Error | null) => {
             if (err) {
               reject(err);
             } else {
@@ -167,7 +171,7 @@ export class TraefikService {
         labels['traefik.http.routers.traefik.tls.certresolver'] = 'letsencrypt';
       }
 
-      const container = await this.docker.createContainer({
+      const container = await this.getDocker().createContainer({
         Image: 'traefik:v2.10',
         name: this.TRAEFIK_CONTAINER_NAME,
         Cmd: cmdArgs,
@@ -195,7 +199,7 @@ export class TraefikService {
       });
 
       // Connect to Traefik network
-      const network = this.docker.getNetwork(this.TRAEFIK_NETWORK_NAME);
+      const network = this.getDocker().getNetwork(this.TRAEFIK_NETWORK_NAME);
       await network.connect({
         Container: container.id,
       });
@@ -213,7 +217,7 @@ export class TraefikService {
    */
   async uninstallTraefik(): Promise<void> {
     try {
-      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const container = this.getDocker().getContainer(this.TRAEFIK_CONTAINER_NAME);
       
       try {
         await container.stop({ t: 10 });
@@ -260,7 +264,7 @@ export class TraefikService {
    */
   async restartTraefik(): Promise<void> {
     try {
-      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const container = this.getDocker().getContainer(this.TRAEFIK_CONTAINER_NAME);
       await container.restart({ t: 10 });
       console.log('Traefik container restarted');
     } catch (error) {
@@ -276,7 +280,7 @@ export class TraefikService {
    */
   async getTraefikLogs(tail: number = 100): Promise<string> {
     try {
-      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const container = this.getDocker().getContainer(this.TRAEFIK_CONTAINER_NAME);
       const logs = await container.logs({
         stdout: true,
         stderr: true,
@@ -297,7 +301,7 @@ export class TraefikService {
    */
   async getTraefikConfig(): Promise<any> {
     try {
-      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const container = this.getDocker().getContainer(this.TRAEFIK_CONTAINER_NAME);
       const info = await container.inspect();
       
       // Extract relevant configuration
@@ -328,7 +332,7 @@ export class TraefikService {
    */
   async getTraefikConfigForRecreate(): Promise<{ email?: string; domain?: string; cloudflareApiToken?: string }> {
     try {
-      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const container = this.getDocker().getContainer(this.TRAEFIK_CONTAINER_NAME);
       const info = await container.inspect();
       
       // Extract email from command args
@@ -397,7 +401,7 @@ export class TraefikService {
    */
   async getDashboardInfo(): Promise<{ enabled: boolean; url?: string; domain?: string }> {
     try {
-      const container = this.docker.getContainer(this.TRAEFIK_CONTAINER_NAME);
+      const container = this.getDocker().getContainer(this.TRAEFIK_CONTAINER_NAME);
       const info = await container.inspect();
       
       // Check if dashboard is enabled in command args

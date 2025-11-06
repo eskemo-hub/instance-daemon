@@ -1,27 +1,32 @@
 import Docker, { Container } from 'dockerode';
-import { ComposeStackConfig, ComposeStackInfo } from '../types';
-import { execSync, exec } from 'child_process';
+import { ComposeStackConfig, ComposeStackInfo, ComposeFileData, DockerContainerStats } from '../types';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
+import logger from '../utils/logger';
+import { dockerManager } from '../utils/docker-manager';
+import { execCommand } from '../utils/exec-async';
 
 /**
  * ComposeStackService handles Docker Compose stack operations
  * Uses docker compose CLI commands for stack management
  */
 export class ComposeStackService {
-  private docker: Docker;
   private readonly COMPOSE_DIR = '/opt/n8n-daemon/compose';
 
   constructor() {
-    this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
     // Ensure compose directory exists
     if (!fs.existsSync(this.COMPOSE_DIR)) {
       fs.mkdirSync(this.COMPOSE_DIR, { recursive: true, mode: 0o755 });
+      logger.debug({ dir: this.COMPOSE_DIR }, 'Created compose directory');
     }
+  }
+
+  /**
+   * Get Docker instance from manager
+   */
+  private getDocker(): Docker {
+    return dockerManager.getDocker();
   }
 
   /**
@@ -38,11 +43,11 @@ export class ComposeStackService {
 
       // Process and enhance compose file with Traefik labels and environment variables
       let composeContent = config.composeFile;
-      let composeData: any = {};
+      let composeData: ComposeFileData = {};
       
       try {
         // Try to parse as YAML
-        composeData = yaml.load(composeContent) as any;
+        composeData = yaml.load(composeContent) as ComposeFileData;
         
         // If Traefik is enabled, add labels to services
         if (config.useTraefik && config.domain && config.subdomain) {
@@ -73,7 +78,7 @@ export class ComposeStackService {
         });
       } catch (error) {
         // If YAML parsing fails, use original content (might be a template)
-        console.warn(`[COMPOSE] Could not parse compose file as YAML, using as-is: ${this.getErrorMessage(error)}`);
+        logger.warn({ error: this.getErrorMessage(error) }, 'Could not parse compose file as YAML, using as-is');
       }
 
       // Write compose file
@@ -278,7 +283,7 @@ services:
       - name: cors
 `;
           fs.writeFileSync(kongYmlPath, defaultKongYml, { mode: 0o644 });
-          console.log(`[COMPOSE] Created default kong.yml file for stack: ${config.name}`);
+          logger.debug({ stackName: config.name }, 'Created default kong.yml file');
         }
       }
 
@@ -299,7 +304,7 @@ services:
           .join('\n');
         const envFilePath = path.join(stackDir, '.env');
         fs.writeFileSync(envFilePath, envContent, { mode: 0o644 });
-        console.log(`[COMPOSE] Created .env file with ${Object.keys(config.environment).length} variables`);
+        logger.debug({ variableCount: Object.keys(config.environment).length }, 'Created .env file');
       }
 
       // Resolve volume path if template is provided
@@ -315,46 +320,56 @@ services:
       try {
         await this.createVolumeIfNeeded(volumePath);
       } catch (error) {
-        console.warn(`Warning: Could not create volume ${volumePath}:`, error);
+        logger.warn({ volumePath, error: this.getErrorMessage(error) }, 'Could not create volume');
       }
 
       // Run docker compose up in detached mode to create the stack
       // We use `docker compose` (v2) which is the modern way
       const composeCommand = `docker compose -f "${composeFilePath}" -p "${config.name}" up -d`;
-      console.log(`[COMPOSE] Creating stack: ${config.name}`);
-      console.log(`[COMPOSE] Command: ${composeCommand}`);
+      logger.info({ stackName: config.name, command: composeCommand }, 'Creating compose stack');
 
       try {
-        execSync(composeCommand, {
+        await execCommand(composeCommand, {
           cwd: stackDir,
-          stdio: 'pipe',
           env: { ...process.env, ...config.environment },
           timeout: 300000 // 5 minutes timeout for large containers
         });
-      } catch (error: any) {
-        const errorMessage = error.stdout?.toString() || error.stderr?.toString() || error.message;
+        logger.info({ stackName: config.name }, 'Compose stack created successfully');
+      } catch (error: unknown) {
+        const errorMessage = this.getErrorMessage(error);
+        const errorDetails = error instanceof Error && 'stdout' in error 
+          ? (error as { stdout?: string; stderr?: string }).stdout || (error as { stderr?: string }).stderr || errorMessage
+          : errorMessage;
+        
+        logger.error({ 
+          stackName: config.name, 
+          error: errorDetails 
+        }, 'Failed to create compose stack');
         
         // Cleanup any partially created containers
-        console.log(`[COMPOSE] Deployment failed, cleaning up any partially created containers for stack: ${config.name}`);
+        logger.debug({ stackName: config.name }, 'Cleaning up partially created stack');
         try {
           await this.removeStack(config.name, false);
-          console.log(`[COMPOSE] Cleaned up partially created stack: ${config.name}`);
+          logger.info({ stackName: config.name }, 'Cleaned up partially created stack');
         } catch (cleanupError) {
           // Log cleanup errors but don't fail on them - the original error is more important
-          console.warn(`[COMPOSE] Failed to cleanup partially created stack (this is okay): ${this.getErrorMessage(cleanupError)}`);
+          logger.warn({ 
+            stackName: config.name, 
+            error: this.getErrorMessage(cleanupError) 
+          }, 'Failed to cleanup partially created stack (this is okay)');
         }
         
         // Check for port conflicts and provide clearer error message
-        if (errorMessage.includes('port is already allocated') || errorMessage.includes('port is already in use')) {
-          throw new Error(`Port conflict: ${errorMessage}. Please check if another container is using the same port.`);
+        if (errorDetails.includes('port is already allocated') || errorDetails.includes('port is already in use')) {
+          throw new Error(`Port conflict: ${errorDetails}. Please check if another container is using the same port.`);
         }
         
         // Check for DNS errors
-        if (errorMessage.includes('getaddrinfo') || errorMessage.includes('EAI_AGAIN')) {
-          throw new Error(`DNS lookup failed: ${errorMessage}. Please check your compose file for invalid hostnames or network configuration.`);
+        if (errorDetails.includes('getaddrinfo') || errorDetails.includes('EAI_AGAIN')) {
+          throw new Error(`DNS lookup failed: ${errorDetails}. Please check your compose file for invalid hostnames or network configuration.`);
         }
         
-        throw new Error(`Failed to create compose stack: ${errorMessage}`);
+        throw new Error(`Failed to create compose stack: ${errorDetails}`);
       }
 
       // Get stack status (with error handling to prevent crashes)
@@ -363,7 +378,10 @@ services:
         stackInfo = await this.getStackStatus(config.name);
       } catch (error) {
         // If getting stack status fails, still return a basic status
-        console.warn(`[COMPOSE] Could not get full stack status for ${config.name}:`, error);
+        logger.warn({ 
+          stackName: config.name, 
+          error: this.getErrorMessage(error) 
+        }, 'Could not get full stack status');
         stackInfo = {
           name: config.name,
           status: 'unknown',
@@ -389,11 +407,10 @@ services:
       }
 
       const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" start`;
-      console.log(`[COMPOSE] Starting stack: ${stackName}`);
+      logger.info({ stackName }, 'Starting compose stack');
 
-      execSync(composeCommand, {
-        cwd: stackDir,
-        stdio: 'pipe'
+      await execCommand(composeCommand, {
+        cwd: stackDir
       });
     } catch (error) {
       throw new Error(`Failed to start compose stack: ${this.getErrorMessage(error)}`);
@@ -413,11 +430,10 @@ services:
       }
 
       const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" stop`;
-      console.log(`[COMPOSE] Stopping stack: ${stackName}`);
+      logger.info({ stackName }, 'Stopping compose stack');
 
-      execSync(composeCommand, {
-        cwd: stackDir,
-        stdio: 'pipe'
+      await execCommand(composeCommand, {
+        cwd: stackDir
       });
     } catch (error) {
       throw new Error(`Failed to stop compose stack: ${this.getErrorMessage(error)}`);
@@ -437,11 +453,10 @@ services:
       }
 
       const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" restart`;
-      console.log(`[COMPOSE] Restarting stack: ${stackName}`);
+      logger.info({ stackName }, 'Restarting compose stack');
 
-      execSync(composeCommand, {
-        cwd: stackDir,
-        stdio: 'pipe'
+      await execCommand(composeCommand, {
+        cwd: stackDir
       });
     } catch (error) {
       throw new Error(`Failed to restart compose stack: ${this.getErrorMessage(error)}`);
@@ -456,30 +471,61 @@ services:
       const stackDir = path.join(this.COMPOSE_DIR, stackName);
       const composeFilePath = path.join(stackDir, 'docker-compose.yml');
 
-      if (!fs.existsSync(composeFilePath)) {
-        // Stack might already be removed, check if containers exist
-        const containers = await this.getStackContainers(stackName);
-        if (containers.length === 0) {
-          console.log(`[COMPOSE] Stack ${stackName} not found or already removed`);
-          return;
+      // First, check if any containers exist for this stack
+      const containersBefore = await this.getStackContainers(stackName);
+      if (containersBefore.length === 0 && !fs.existsSync(composeFilePath)) {
+        logger.info({ stackName }, 'Stack not found or already removed');
+        // Clean up stack directory if it exists
+        if (fs.existsSync(stackDir)) {
+          fs.rmSync(stackDir, { recursive: true, force: true });
+        }
+        return;
+      }
+
+      // Try to use docker compose down if compose file exists
+      if (fs.existsSync(composeFilePath)) {
+        // Use --remove-orphans to remove containers that are no longer in the compose file
+        const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" down --remove-orphans${removeVolumes ? ' -v' : ''}`;
+        logger.info({ stackName, removeVolumes }, 'Removing compose stack with docker compose down');
+
+        try {
+          await execCommand(composeCommand, {
+            cwd: stackDir
+          });
+          logger.info({ stackName }, 'Docker compose down completed');
+        } catch (error: unknown) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          logger.warn({ stackName, error: errorMsg }, 'Docker compose down failed, will try direct container removal');
+          // Continue to fallback removal below
         }
       }
 
-      const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" down${removeVolumes ? ' -v' : ''}`;
-      console.log(`[COMPOSE] Removing stack: ${stackName} (removeVolumes: ${removeVolumes})`);
+      // Verify and remove any remaining containers (fallback or cleanup after compose down)
+      const containersAfter = await this.getStackContainers(stackName);
+      if (containersAfter.length > 0) {
+        logger.info({ stackName, remainingContainers: containersAfter.length }, 'Removing remaining stack containers directly');
+        await this.removeStackContainers(stackName, removeVolumes);
+      }
 
-      try {
-        execSync(composeCommand, {
-          cwd: stackDir,
-          stdio: 'pipe'
-        });
-      } catch (error: any) {
-        // If compose file doesn't exist but containers do, try to remove containers directly
-        if (!fs.existsSync(composeFilePath)) {
-          console.log(`[COMPOSE] Compose file not found, removing containers directly`);
-          await this.removeStackContainers(stackName, removeVolumes);
-        } else {
-          throw error;
+      // Final verification - check if any containers still exist
+      const containersFinal = await this.getStackContainers(stackName);
+      if (containersFinal.length > 0) {
+        logger.warn({ stackName, remainingContainers: containersFinal.length }, 'Some containers still exist after removal attempt');
+        // Try one more time with force removal
+        for (const container of containersFinal) {
+          try {
+            const containerInfo = await container.inspect();
+            // Force stop if running
+            if (containerInfo.State.Running) {
+              await container.stop({ t: 0 }); // Force stop immediately
+            }
+            // Force remove
+            await container.remove({ v: removeVolumes, force: true });
+            logger.info({ stackName, containerId: container.id }, 'Force removed remaining container');
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            logger.error({ stackName, containerId: container.id, error: errorMsg }, 'Failed to force remove container');
+          }
         }
       }
 
@@ -487,6 +533,8 @@ services:
       if (fs.existsSync(stackDir)) {
         fs.rmSync(stackDir, { recursive: true, force: true });
       }
+
+      logger.info({ stackName }, 'Stack removal completed');
     } catch (error) {
       throw new Error(`Failed to remove compose stack: ${this.getErrorMessage(error)}`);
     }
@@ -581,7 +629,7 @@ services:
       if (options.container) {
         try {
           // Try to find the container by name (full container name from getStackContainersInfo)
-          const containers = await this.docker.listContainers({ all: true });
+          const containers = await this.getDocker().listContainers({ all: true });
           const container = containers.find(c => {
             const containerName = c.Names[0]?.replace(/^\//, '') || '';
             // Match exact container name
@@ -589,7 +637,7 @@ services:
           });
 
           if (container) {
-            const dockerContainer = this.docker.getContainer(container.Id);
+            const dockerContainer = this.getDocker().getContainer(container.Id);
             const logs = await dockerContainer.logs({
               stdout: true,
               stderr: true,
@@ -611,7 +659,7 @@ services:
           }
         } catch (containerError) {
           // If container-specific logging fails, fall through to compose logs
-          console.warn(`[COMPOSE] Failed to get logs for container ${options.container}, falling back to compose logs: ${this.getErrorMessage(containerError)}`);
+          logger.warn({ container: options.container, error: this.getErrorMessage(containerError) }, 'Failed to get logs for container, falling back to compose logs');
         }
       }
 
@@ -631,7 +679,7 @@ services:
         composeCommand += ` --tail 100`;
       }
 
-      const { stdout } = await execAsync(composeCommand, {
+      const { stdout } = await execCommand(composeCommand, {
         cwd: stackDir
       });
 
@@ -667,7 +715,8 @@ services:
             const stats = await container.stats({ stream: false });
             
             // Calculate CPU percentage
-            const cpuPercent = this.calculateCpuPercent(stats);
+            // Cast stats to DockerContainerStats for calculation
+            const cpuPercent = this.calculateCpuPercent(stats as unknown as DockerContainerStats);
             
             // Memory metrics - use container's configured limit if set
             const memoryUsed = stats.memory_stats?.usage || 0;
@@ -694,8 +743,9 @@ services:
             let networkTx = 0;
             if (stats.networks) {
               for (const network of Object.values(stats.networks)) {
-                networkRx += (network as any).rx_bytes || 0;
-                networkTx += (network as any).tx_bytes || 0;
+                const networkStats = network as { rx_bytes?: number; tx_bytes?: number };
+                networkRx += networkStats.rx_bytes || 0;
+                networkTx += networkStats.tx_bytes || 0;
               }
             }
 
@@ -738,7 +788,7 @@ services:
    */
   private async getStackContainers(stackName: string): Promise<Container[]> {
     try {
-      const containers = await this.docker.listContainers({ all: true });
+      const containers = await this.getDocker().listContainers({ all: true });
       const stackContainers = containers
         .filter(container => {
           // Method 1: Check Docker Compose labels (most reliable)
@@ -753,7 +803,7 @@ services:
           const containerName = container.Names[0]?.replace(/^\//, '') || '';
           return containerName.startsWith(`${stackName}_`) || containerName === stackName;
         })
-        .map(container => this.docker.getContainer(container.Id));
+        .map(container => this.getDocker().getContainer(container.Id));
 
       return stackContainers;
     } catch (error) {
@@ -772,7 +822,7 @@ services:
     service?: string;
   }>> {
     try {
-      const containers = await this.docker.listContainers({ all: true });
+      const containers = await this.getDocker().listContainers({ all: true });
       
       // Docker Compose containers can be matched by:
       // 1. Container labels (com.docker.compose.project) - most reliable
@@ -845,16 +895,15 @@ services:
         }
       }
 
-      console.log(`[COMPOSE] Found ${stackContainers.length} containers for stack: ${stackName}`);
+      logger.debug({ stackName, containerCount: stackContainers.length }, 'Found containers for stack');
       if (stackContainers.length === 0) {
-        console.log(`[COMPOSE] No containers found. Searched for prefix: ${stackName}_`);
-        console.log(`[COMPOSE] Checking first 10 containers for debugging:`);
-        containers.slice(0, 10).forEach(c => {
-          const name = c.Names[0]?.replace(/^\//, '') || '';
-          const project = c.Labels?.['com.docker.compose.project'] || 'N/A';
-          const service = c.Labels?.['com.docker.compose.service'] || 'N/A';
-          console.log(`  - Name: ${name}, Project Label: ${project}, Service Label: ${service}`);
-        });
+        logger.debug({ stackName }, 'No containers found. Searched for prefix');
+        const sampleContainers = containers.slice(0, 10).map(c => ({
+          name: c.Names[0]?.replace(/^\//, '') || '',
+          project: c.Labels?.['com.docker.compose.project'] || 'N/A',
+          service: c.Labels?.['com.docker.compose.service'] || 'N/A'
+        }));
+        logger.debug({ stackName, sampleContainers }, 'Sample containers for debugging');
       }
 
       return stackContainers;
@@ -869,17 +918,45 @@ services:
   private async removeStackContainers(stackName: string, removeVolumes: boolean): Promise<void> {
     const containers = await this.getStackContainers(stackName);
     
+    if (containers.length === 0) {
+      logger.info({ stackName }, 'No containers found to remove');
+      return;
+    }
+
+    logger.info({ stackName, containerCount: containers.length }, 'Removing stack containers directly');
+    
     for (const container of containers) {
       try {
         const containerInfo = await container.inspect();
+        const containerName = containerInfo.Name?.replace(/^\//, '') || container.id;
+        
         // Stop container if running
         if (containerInfo.State.Running) {
-          await container.stop();
+          logger.info({ stackName, containerName }, 'Stopping container');
+          try {
+            await container.stop({ t: 10 }); // Give 10 seconds for graceful shutdown
+          } catch (stopError) {
+            logger.warn({ stackName, containerName, error: stopError }, 'Failed to stop container gracefully, forcing stop');
+            await container.stop({ t: 0 }); // Force stop immediately
+          }
         }
+        
         // Remove container
+        logger.info({ stackName, containerName }, 'Removing container');
         await container.remove({ v: removeVolumes });
+        logger.info({ stackName, containerName }, 'Container removed successfully');
       } catch (error) {
-        console.warn(`Failed to remove container ${container.id}:`, error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        logger.error({ stackName, containerId: container.id, error: errorMsg }, 'Failed to remove container, trying force removal');
+        
+        // Try force removal as last resort
+        try {
+          await container.remove({ v: removeVolumes, force: true });
+          logger.info({ stackName, containerId: container.id }, 'Container force removed');
+        } catch (forceError) {
+          const forceErrorMsg = forceError instanceof Error ? forceError.message : String(forceError);
+          logger.error({ stackName, containerId: container.id, error: forceErrorMsg }, 'Failed to force remove container');
+        }
       }
     }
   }
@@ -894,43 +971,45 @@ services:
       try {
         const hostDir = path.resolve(volumeName);
         if (!fs.existsSync(hostDir)) {
-          console.log(`[COMPOSE] Creating host directory: ${hostDir}`);
+          logger.debug({ dir: hostDir }, 'Creating host directory');
           fs.mkdirSync(hostDir, { recursive: true, mode: 0o755 });
           
           // Set proper ownership if running as root (common in daemon environments)
           try {
             // Try to set ownership to 1000:1000 (common Docker user)
-            execSync(`chown -R 1000:1000 "${hostDir}"`, { stdio: 'ignore' });
-            console.log(`[COMPOSE] Set ownership of ${hostDir} to 1000:1000`);
+            await execCommand(`chown -R 1000:1000 "${hostDir}"`, { stdio: 'ignore' as const });
+            logger.debug({ dir: hostDir }, 'Set ownership to 1000:1000');
           } catch (chownError) {
             // Continue anyway - the directory was created with proper mode
-            console.warn(`[COMPOSE] Could not set ownership for ${hostDir}: ${chownError}`);
+            logger.warn({ dir: hostDir, error: this.getErrorMessage(chownError) }, 'Could not set ownership');
           }
         } else {
-          console.log(`[COMPOSE] Host directory already exists: ${hostDir}`);
+          logger.debug({ dir: hostDir }, 'Host directory already exists');
         }
       } catch (error) {
         // Don't throw - host directory creation is not critical if it fails
         // The compose command will handle it or fail with a clearer error
-        console.warn(`[COMPOSE] Could not create host directory ${volumeName}:`, error);
+        logger.warn({ volumeName, error: this.getErrorMessage(error) }, 'Could not create host directory');
       }
     } else {
       // This is a Docker volume name, try to create Docker volume
       try {
-        const volume = this.docker.getVolume(volumeName);
+        const volume = this.getDocker().getVolume(volumeName);
         await volume.inspect();
         // Volume exists
-        console.log(`[COMPOSE] Volume already exists: ${volumeName}`);
-      } catch (error: any) {
-        if (error.statusCode === 404) {
+        logger.debug({ volumeName }, 'Volume already exists');
+      } catch (error: unknown) {
+        const dockerError = error as { statusCode?: number; message?: string };
+        if (dockerError.statusCode === 404) {
           // Volume doesn't exist, create it
           try {
-            await this.docker.createVolume({ Name: volumeName });
-            console.log(`[COMPOSE] Created Docker volume: ${volumeName}`);
-          } catch (createError: any) {
+            await this.getDocker().createVolume({ Name: volumeName });
+            logger.info({ volumeName }, 'Created Docker volume');
+          } catch (createError: unknown) {
             // Handle HTTP 301 and other Docker API errors gracefully
-            if (createError.statusCode === 301 || createError.statusCode >= 400) {
-              console.warn(`[COMPOSE] Could not create Docker volume ${volumeName}:`, createError.message);
+            const dockerCreateError = createError as { statusCode?: number; message?: string };
+            if (dockerCreateError.statusCode === 301 || (dockerCreateError.statusCode && dockerCreateError.statusCode >= 400)) {
+              logger.warn({ volumeName, error: dockerCreateError.message }, 'Could not create Docker volume');
               // Don't throw - volume creation might be handled by compose file itself
             } else {
               throw createError;
@@ -938,7 +1017,7 @@ services:
           }
         } else {
           // For other errors (like 301), log but don't throw
-          console.warn(`[COMPOSE] Could not inspect Docker volume ${volumeName}:`, error.message);
+          logger.warn({ volumeName, error: this.getErrorMessage(error) }, 'Could not inspect Docker volume');
         }
       }
     }
@@ -947,7 +1026,7 @@ services:
   /**
    * Calculate CPU percentage from Docker stats
    */
-  private calculateCpuPercent(stats: any): number {
+  private calculateCpuPercent(stats: DockerContainerStats): number {
     if (!stats.cpu_stats || !stats.precpu_stats) {
       return 0;
     }
@@ -976,11 +1055,10 @@ services:
       }
 
       const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" restart ${serviceName}`;
-      console.log(`[COMPOSE] Restarting service ${serviceName} in stack: ${stackName}`);
+      logger.info({ stackName, serviceName }, 'Restarting service in stack');
 
-      execSync(composeCommand, {
-        cwd: stackDir,
-        stdio: 'pipe'
+      await execCommand(composeCommand, {
+        cwd: stackDir
       });
     } catch (error) {
       throw new Error(`Failed to restart service ${serviceName}: ${this.getErrorMessage(error)}`);
@@ -1000,11 +1078,10 @@ services:
       }
 
       const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" start ${serviceName}`;
-      console.log(`[COMPOSE] Starting service ${serviceName} in stack: ${stackName}`);
+      logger.info({ stackName, serviceName }, 'Starting service in stack');
 
-      execSync(composeCommand, {
-        cwd: stackDir,
-        stdio: 'pipe'
+      await execCommand(composeCommand, {
+        cwd: stackDir
       });
     } catch (error) {
       throw new Error(`Failed to start service ${serviceName}: ${this.getErrorMessage(error)}`);
@@ -1024,11 +1101,10 @@ services:
       }
 
       const composeCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" stop ${serviceName}`;
-      console.log(`[COMPOSE] Stopping service ${serviceName} in stack: ${stackName}`);
+      logger.info({ stackName, serviceName }, 'Stopping service in stack');
 
-      execSync(composeCommand, {
-        cwd: stackDir,
-        stdio: 'pipe'
+      await execCommand(composeCommand, {
+        cwd: stackDir
       });
     } catch (error) {
       throw new Error(`Failed to stop service ${serviceName}: ${this.getErrorMessage(error)}`);
@@ -1051,12 +1127,12 @@ services:
    * Add Traefik labels to services in compose file
    */
   private addTraefikLabels(
-    composeData: any, 
+    composeData: ComposeFileData, 
     domain: string, 
     subdomain: string, 
     port: number,
     traefikConfig?: Record<string, { internalPort: number; enabled?: boolean; serviceName?: string }>
-  ): any {
+  ): ComposeFileData {
     if (!composeData.services) {
       return composeData;
     }
@@ -1075,12 +1151,11 @@ services:
 
     // Handle main URL routing (if configured)
     const mainConfig = traefikConfig?.['_main'] as { serviceName?: string; internalPort?: number } | undefined;
-    console.log(`[COMPOSE] Checking _main config:`, JSON.stringify(mainConfig));
-    console.log(`[COMPOSE] Full traefikConfig keys:`, traefikConfig ? Object.keys(traefikConfig) : 'none');
+    logger.debug({ mainConfig, traefikConfigKeys: traefikConfig ? Object.keys(traefikConfig) : [] }, 'Checking _main config');
     
     if (mainConfig?.serviceName && mainConfig.internalPort !== undefined && mainConfig.internalPort > 0) {
       const mainServiceName = mainConfig.serviceName;
-      const mainService = composeData.services[mainServiceName] as any;
+      const mainService = composeData.services[mainServiceName];
       
       if (mainService) {
         // Initialize labels if not present
@@ -1098,7 +1173,7 @@ services:
           : parseInt(String(mainConfig.internalPort), 10);
 
         if (isNaN(mainInternalPort) || mainInternalPort <= 0) {
-          console.warn(`[COMPOSE] Invalid internalPort (${mainConfig.internalPort}) for main service ${mainServiceName}, skipping main URL routing`);
+          logger.warn({ serviceName: mainServiceName, internalPort: mainConfig.internalPort }, 'Invalid internalPort for main service, skipping main URL routing');
         } else {
           // Add Traefik labels for main URL
           mainService.labels['traefik.enable'] = 'true';
@@ -1108,28 +1183,37 @@ services:
           mainService.labels[`traefik.http.routers.${mainRouterName}.tls.certresolver`] = 'letsencrypt';
           mainService.labels[`traefik.http.services.${mainRouterName}.loadbalancer.server.port`] = mainInternalPort.toString();
           
-          console.log(`[COMPOSE] Configured main URL routing: ${mainFullDomain} → ${mainServiceName}:${mainInternalPort} (from template Traefik config)`);
+          logger.info({ domain: mainFullDomain, service: mainServiceName, port: mainInternalPort }, 'Configured main URL routing');
 
           // Add network to main service
           if (!mainService.networks) {
             mainService.networks = [];
           }
-          if (!mainService.networks.includes(traefikNetwork)) {
-            mainService.networks.push(traefikNetwork);
+          // Handle networks as array or object
+          const networksArray = Array.isArray(mainService.networks) 
+            ? mainService.networks 
+            : Object.keys(mainService.networks || {});
+          if (!networksArray.includes(traefikNetwork)) {
+            if (Array.isArray(mainService.networks)) {
+              mainService.networks.push(traefikNetwork);
+            } else {
+              // Convert to array if it was an object
+              mainService.networks = [...networksArray, traefikNetwork];
+            }
           }
         }
       } else {
-        console.warn(`[COMPOSE] Main service ${mainServiceName} specified in _main config but not found in compose file services`);
+        logger.warn({ serviceName: mainServiceName }, 'Main service specified in _main config but not found in compose file services');
       }
     } else {
       if (traefikConfig && '_main' in traefikConfig) {
-        console.warn(`[COMPOSE] _main config exists but is missing required fields (serviceName: ${mainConfig?.serviceName || 'missing'}, internalPort: ${mainConfig?.internalPort || 'missing'}). Main URL routing will not be configured.`);
+        logger.warn({ serviceName: mainConfig?.serviceName, internalPort: mainConfig?.internalPort }, '_main config exists but is missing required fields. Main URL routing will not be configured.');
       }
     }
 
     // Add Traefik labels to each service
     for (const [serviceName, serviceConfig] of Object.entries(composeData.services)) {
-      const service = serviceConfig as any;
+      const service = serviceConfig;
       
       // Skip _main entry (it's metadata, not a service)
       if (serviceName === '_main') {
@@ -1179,7 +1263,7 @@ services:
       // First priority: Use port from Traefik config (from template Traefik tab)
       if (serviceTraefikConfig?.internalPort && serviceTraefikConfig.internalPort > 0) {
         servicePort = serviceTraefikConfig.internalPort;
-        console.log(`[COMPOSE] Using Traefik config port ${servicePort} for service ${serviceName}`);
+        logger.debug({ serviceName, port: servicePort }, 'Using Traefik config port');
       } else {
         // Second priority: Try to detect from compose file ports
         if (service.ports && Array.isArray(service.ports) && service.ports.length > 0) {
@@ -1192,24 +1276,21 @@ services:
               const containerPort = parseInt(parts[1]);
               if (!isNaN(containerPort) && containerPort > 0) {
                 servicePort = containerPort;
-                console.log(`[COMPOSE] Detected container port ${servicePort} from compose file for service ${serviceName}`);
+                logger.debug({ serviceName, port: servicePort }, 'Detected container port from compose file');
               }
             } else if (parts.length === 1) {
               // Single port - container port
               const containerPort = parseInt(parts[0]);
               if (!isNaN(containerPort) && containerPort > 0) {
                 servicePort = containerPort;
-                console.log(`[COMPOSE] Detected single port ${servicePort} from compose file for service ${serviceName}`);
+                logger.debug({ serviceName, port: servicePort }, 'Detected single port from compose file');
               }
             }
           } else if (typeof portMapping === 'object') {
             // Format: { target: 80, published: 8000, protocol: 'tcp' }
             if (portMapping.target && portMapping.target > 0) {
               servicePort = portMapping.target;
-              console.log(`[COMPOSE] Detected target port ${servicePort} from compose file for service ${serviceName}`);
-            } else if (portMapping.container && portMapping.container > 0) {
-              servicePort = portMapping.container;
-              console.log(`[COMPOSE] Detected container port ${servicePort} from compose file for service ${serviceName}`);
+              logger.debug({ serviceName, port: servicePort }, 'Detected target port from compose file');
             }
           }
         }
@@ -1219,14 +1300,14 @@ services:
           const exposedPort = parseInt(service.expose[0]);
           if (!isNaN(exposedPort) && exposedPort > 0) {
             servicePort = exposedPort;
-            console.log(`[COMPOSE] Using exposed port ${servicePort} for service ${serviceName}`);
+            logger.debug({ serviceName, port: servicePort }, 'Using exposed port');
           }
         }
         
         // Last resort: Use allocated port (should rarely happen if compose file is properly configured)
         if (servicePort === null || servicePort <= 0) {
           servicePort = port;
-          console.warn(`[COMPOSE] WARNING: No valid port found for service ${serviceName}, falling back to allocated port ${port}. Consider configuring the service in the Traefik tab or adding ports to the compose file.`);
+          logger.warn({ serviceName, fallbackPort: port }, 'No valid port found for service, falling back to allocated port. Consider configuring the service in the Traefik tab or adding ports to the compose file.');
         }
       }
       
@@ -1236,8 +1317,17 @@ services:
       if (!service.networks) {
         service.networks = [];
       }
-      if (!service.networks.includes(traefikNetwork)) {
-        service.networks.push(traefikNetwork);
+      // Handle networks as array or object
+      const networksArray = Array.isArray(service.networks) 
+        ? service.networks 
+        : Object.keys(service.networks || {});
+      if (!networksArray.includes(traefikNetwork)) {
+        if (Array.isArray(service.networks)) {
+          service.networks.push(traefikNetwork);
+        } else {
+          // Convert to array if it was an object
+          service.networks = [...networksArray, traefikNetwork];
+        }
       }
     }
 
@@ -1250,14 +1340,14 @@ services:
    * environment section to ensure they're available. Variables using ${VAR} syntax in the compose
    * file will be resolved from the .env file automatically.
    */
-  private addEnvironmentVariables(composeData: any, envVars: Record<string, string>): any {
+  private addEnvironmentVariables(composeData: ComposeFileData, envVars: Record<string, string>): ComposeFileData {
     if (!composeData.services) {
       return composeData;
     }
 
     // Add environment variables to each service
     for (const [serviceName, serviceConfig] of Object.entries(composeData.services)) {
-      const service = serviceConfig as any;
+      const service = serviceConfig;
       
       // Initialize environment if not present
       if (!service.environment) {
@@ -1319,14 +1409,14 @@ services:
   /**
    * Add resource limits to services in compose file
    */
-  private addResourceLimits(composeData: any, config: ComposeStackConfig): any {
+  private addResourceLimits(composeData: ComposeFileData, config: ComposeStackConfig): ComposeFileData {
     if (!composeData.services) {
       return composeData;
     }
 
     // Add resource limits to each service
     for (const [serviceName, serviceConfig] of Object.entries(composeData.services)) {
-      const service = serviceConfig as any;
+      const service = serviceConfig;
       
       // Initialize deploy section if not present
       if (!service.deploy) {
@@ -1351,25 +1441,25 @@ services:
       // Apply CPU limit
       if (config.cpuLimit !== undefined && config.cpuLimit > 0) {
         service.deploy.resources.limits.cpus = `${config.cpuLimit}`;
-        console.log(`[COMPOSE] Applying CPU limit to ${serviceName}: ${config.cpuLimit} cores`);
+        logger.debug({ serviceName, cpuLimit: config.cpuLimit }, 'Applying CPU limit');
       }
 
       // Apply memory limit
       if (config.memoryLimit) {
         service.deploy.resources.limits.memory = config.memoryLimit;
-        console.log(`[COMPOSE] Applying memory limit to ${serviceName}: ${config.memoryLimit}`);
+        logger.debug({ serviceName, memoryLimit: config.memoryLimit }, 'Applying memory limit');
       }
 
       // Apply memory reservation (soft limit)
       if (config.memoryReservation) {
         service.deploy.resources.reservations.memory = config.memoryReservation;
-        console.log(`[COMPOSE] Applying memory reservation to ${serviceName}: ${config.memoryReservation}`);
+        logger.debug({ serviceName, memoryReservation: config.memoryReservation }, 'Applying memory reservation');
       }
 
       // Note: Storage limits are not directly supported in Docker Compose
       // They would need to be enforced at the volume/filesystem level
       if (config.storageLimit) {
-        console.log(`[COMPOSE] Storage limit specified: ${config.storageLimit} (not applied at compose level)`);
+        logger.debug({ storageLimit: config.storageLimit }, 'Storage limit specified (not applied at compose level)');
       }
     }
 

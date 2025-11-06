@@ -1,4 +1,6 @@
 import Docker from 'dockerode';
+import logger from '../utils/logger';
+import { dockerManager } from '../utils/docker-manager';
 
 /**
  * ContainerStatsService handles real-time container resource monitoring
@@ -20,10 +22,11 @@ export interface ContainerStats {
 }
 
 export class ContainerStatsService {
-    private docker: Docker;
-
-    constructor() {
-        this.docker = new Docker({ socketPath: '/var/run/docker.sock' });
+    /**
+     * Get Docker instance from manager
+     */
+    private getDocker(): Docker {
+        return dockerManager.getDocker();
     }
 
     /**
@@ -31,7 +34,7 @@ export class ContainerStatsService {
      */
     async getContainerStats(containerId: string): Promise<ContainerStats> {
         try {
-            const container = this.docker.getContainer(containerId);
+            const container = this.getDocker().getContainer(containerId);
 
             // Get container info for name and limits
             const info = await container.inspect();
@@ -188,7 +191,7 @@ export class ContainerStatsService {
      */
     async listN8nContainers(): Promise<Array<{ id: string; name: string; status: string }>> {
         try {
-            const containers = await this.docker.listContainers({ all: true });
+            const containers = await this.getDocker().listContainers({ all: true });
 
             // Filter n8n containers (by image name)
             const n8nContainers = containers
