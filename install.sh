@@ -248,7 +248,6 @@ EOF
     else
       echo -e "${YELLOW}Skipping HAProxy config generation. You can edit /etc/haproxy/haproxy.cfg later.${NC}"
     fi
-  fi
 fi
 
 # Step 4: Create dedicated user
