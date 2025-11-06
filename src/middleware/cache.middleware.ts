@@ -47,7 +47,8 @@ export function createCacheMiddleware(options: CacheOptions) {
     if (cached) {
       logger.debug({ key, path: req.path }, 'Cache hit');
       res.setHeader('X-Cache', 'HIT');
-      return res.json(cached);
+      res.json(cached);
+      return;
     }
 
     // Store original json method

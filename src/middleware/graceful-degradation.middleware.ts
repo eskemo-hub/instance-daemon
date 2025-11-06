@@ -199,13 +199,14 @@ export function gracefulDegradationMiddleware(req: Request, res: Response, next:
 
   if (!allowed) {
     const degraded = gracefulDegradation.getDegradedResponse();
-    return res.status(503).json({
+    res.status(503).json({
       success: false,
       error: 'ServiceUnavailable',
       message: degraded.message,
       mode: degraded.mode,
       allowedOperations: degraded.allowedOperations
     });
+    return;
   }
 
   next();

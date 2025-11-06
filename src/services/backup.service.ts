@@ -292,5 +292,97 @@ export class BackupService {
   }
 }
 
+  /**
+   * Create a Docker container backup (backup volume data)
+   * This creates a tar archive of the container's volume
+   */
+  async createBackup(containerId: string, backupPath?: string): Promise<{ backupPath: string; size: number }> {
+    const { execCommand } = await import('../utils/exec-async');
+    const { DockerService } = await import('./docker.service');
+    const dockerService = new DockerService();
+    
+    // Get container info to find volume
+    const containers = await dockerService.listAllContainers(false);
+    const container = containers.find(c => c.id === containerId || c.id.startsWith(containerId));
+    
+    if (!container) {
+      throw new Error(`Container ${containerId} not found`);
+    }
+
+    // Extract volume name from container (assuming volume name pattern)
+    // This is a simplified implementation - you may need to inspect the container to get actual volume mounts
+    const volumeName = container.name.replace(/[^a-zA-Z0-9]/g, '_');
+    const volumePath = this.getDatabasePath(volumeName.replace('_data', ''));
+    const volumeDir = path.dirname(volumePath);
+
+    // Generate backup path if not provided
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const defaultBackupPath = `/opt/n8n-daemon/backups/${containerId}-${timestamp}.tar.gz`;
+    const finalBackupPath = backupPath || defaultBackupPath;
+
+    // Ensure backup directory exists
+    const backupDir = path.dirname(finalBackupPath);
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+
+    // Create tar archive of volume
+    await execCommand(`tar -czf "${finalBackupPath}" -C "${volumeDir}" .`);
+
+    // Get backup size
+    const stats = fs.statSync(finalBackupPath);
+    
+    return {
+      backupPath: finalBackupPath,
+      size: stats.size
+    };
+  }
+
+  /**
+   * Restore a Docker container backup
+   * This restores volume data from a tar archive
+   */
+  async restoreBackup(containerId: string, backupPath: string): Promise<{ success: boolean }> {
+    const { execCommand } = await import('../utils/exec-async');
+    const { DockerService } = await import('./docker.service');
+    const dockerService = new DockerService();
+    
+    // Check backup file exists
+    if (!fs.existsSync(backupPath)) {
+      throw new Error(`Backup file not found: ${backupPath}`);
+    }
+
+    // Get container info to find volume
+    const containers = await dockerService.listAllContainers(false);
+    const container = containers.find(c => c.id === containerId || c.id.startsWith(containerId));
+    
+    if (!container) {
+      throw new Error(`Container ${containerId} not found`);
+    }
+
+    // Extract volume name from container
+    const volumeName = container.name.replace(/[^a-zA-Z0-9]/g, '_');
+    const volumePath = this.getDatabasePath(volumeName.replace('_data', ''));
+    const volumeDir = path.dirname(volumePath);
+
+    // Ensure volume directory exists
+    if (!fs.existsSync(volumeDir)) {
+      fs.mkdirSync(volumeDir, { recursive: true });
+    }
+
+    // Stop container before restore (if running)
+    try {
+      await dockerService.stopContainer(containerId);
+    } catch (error) {
+      // Container might already be stopped
+    }
+
+    // Extract backup
+    await execCommand(`tar -xzf "${backupPath}" -C "${volumeDir}"`);
+
+    return { success: true };
+  }
+}
+
 // Export singleton instance
 export const backupService = new BackupService();

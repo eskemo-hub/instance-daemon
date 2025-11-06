@@ -25,7 +25,7 @@ export function performanceMiddleware(req: Request, res: Response, next: NextFun
   const originalEnd = res.end.bind(res);
 
   // Override end to capture metrics
-  res.end = function(chunk?: any, encoding?: any) {
+  res.end = function(chunk?: any, encoding?: any): Response {
     const duration = Date.now() - startTime;
     const metrics: PerformanceMetrics = {
       method: req.method,
@@ -53,7 +53,7 @@ export function performanceMiddleware(req: Request, res: Response, next: NextFun
     storePerformanceMetrics(metrics);
 
     // Call original end
-    originalEnd(chunk, encoding);
+    return originalEnd(chunk, encoding);
   };
 
   next();

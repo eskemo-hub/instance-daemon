@@ -29,7 +29,7 @@ export function auditMiddleware(req: Request, res: Response, next: NextFunction)
   const originalEnd = res.end.bind(res);
 
   // Override end to capture response
-  res.end = function(chunk?: any, encoding?: any) {
+  res.end = function(chunk?: any, encoding?: any): Response {
     const duration = Date.now() - startTime;
     const success = res.statusCode >= 200 && res.statusCode < 400;
 
@@ -59,7 +59,7 @@ export function auditMiddleware(req: Request, res: Response, next: NextFunction)
     logAuditEntry(auditEntry);
 
     // Call original end
-    originalEnd(chunk, encoding);
+    return originalEnd(chunk, encoding);
   };
 
   next();
