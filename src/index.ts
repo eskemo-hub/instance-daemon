@@ -18,6 +18,9 @@ import { jobsRoutes } from './routes/jobs.routes';
 import { configRoutes } from './routes/config.routes';
 import { eventsRoutes } from './routes/events.routes';
 import { statusRoutes } from './routes/status.routes';
+import { metricsRoutes } from './routes/metrics.routes';
+import { pluginsRoutes } from './routes/plugins.routes';
+import { poolRoutes } from './routes/pool.routes';
 import { authMiddleware } from './middleware/auth.middleware';
 import { errorHandler } from './middleware/error.middleware';
 import { apiRateLimiter, strictRateLimiter, criticalRateLimiter } from './middleware/rate-limit.middleware';
@@ -27,6 +30,7 @@ import { gracefulDegradationMiddleware } from './middleware/graceful-degradation
 import { validateEnvironmentOrThrow } from './utils/env-validation';
 import logger from './utils/logger';
 import { dockerManager } from './utils/docker-manager';
+import { metricsExporter } from './services/metrics-exporter.service';
 
 // Load environment variables
 dotenv.config();
@@ -82,6 +86,7 @@ app.use(apiRateLimiter);
 // Public routes (no auth required)
 app.use('/api/health', healthRoutes);
 app.use('/api/status', statusRoutes);
+app.use('/api/metrics', metricsRoutes);
 
 // Protected routes (auth required)
 // Resource-intensive operations use strict rate limiting
@@ -99,6 +104,8 @@ app.use('/api/batch', authMiddleware, strictRateLimiter, batchRoutes);
 app.use('/api/jobs', authMiddleware, jobsRoutes);
 app.use('/api/config', configRoutes);
 app.use('/api/events', eventsRoutes);
+app.use('/api/plugins', authMiddleware, pluginsRoutes);
+app.use('/api/pool', authMiddleware, poolRoutes);
 
 // Error handling middleware
 app.use(errorHandler);
@@ -164,4 +171,8 @@ app.listen(PORT, async () => {
   if (!dockerConnected) {
     logger.warn('Docker connection test failed on startup, but continuing');
   }
+
+  // Start metrics exporter
+  metricsExporter.start(30); // Collect metrics every 30 seconds
+  logger.info('Metrics exporter started');
 });
