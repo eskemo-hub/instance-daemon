@@ -267,6 +267,15 @@ services:
           hide_groups_header: true
           allow:
             - admin
+  - name: studio
+    url: http://studio:3000/
+    routes:
+      - name: studio-all
+        strip_path: false
+        paths:
+          - /
+    plugins:
+      - name: cors
 `;
           fs.writeFileSync(kongYmlPath, defaultKongYml, { mode: 0o644 });
           console.log(`[COMPOSE] Created default kong.yml file for stack: ${config.name}`);
@@ -1046,7 +1055,7 @@ services:
     domain: string, 
     subdomain: string, 
     port: number,
-    traefikConfig?: Record<string, { internalPort: number; enabled: boolean }>
+    traefikConfig?: Record<string, { internalPort: number; enabled?: boolean; serviceName?: string }>
   ): any {
     if (!composeData.services) {
       return composeData;
@@ -1066,6 +1075,9 @@ services:
 
     // Handle main URL routing (if configured)
     const mainConfig = traefikConfig?.['_main'] as { serviceName?: string; internalPort?: number } | undefined;
+    console.log(`[COMPOSE] Checking _main config:`, JSON.stringify(mainConfig));
+    console.log(`[COMPOSE] Full traefikConfig keys:`, traefikConfig ? Object.keys(traefikConfig) : 'none');
+    
     if (mainConfig?.serviceName && mainConfig.internalPort !== undefined && mainConfig.internalPort > 0) {
       const mainServiceName = mainConfig.serviceName;
       const mainService = composeData.services[mainServiceName] as any;
@@ -1127,8 +1139,9 @@ services:
       // Check if service has Traefik configuration
       const serviceTraefikConfig = traefikConfig?.[serviceName];
       
-      // Skip if Traefik config exists and service is disabled
-      if (serviceTraefikConfig && !serviceTraefikConfig.enabled) {
+      // Skip if Traefik config exists and service is explicitly disabled
+      // Note: enabled is optional - if not specified, service is enabled by default
+      if (serviceTraefikConfig && serviceTraefikConfig.enabled === false) {
         continue;
       }
 
