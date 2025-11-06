@@ -732,10 +732,17 @@ services:
       const containers = await this.docker.listContainers({ all: true });
       const stackContainers = containers
         .filter(container => {
-          // Docker Compose uses project name prefix for containers
-          // Format: {project}_{service}_{number}
+          // Method 1: Check Docker Compose labels (most reliable)
+          if (container.Labels) {
+            const projectLabel = container.Labels['com.docker.compose.project'];
+            if (projectLabel === stackName) {
+              return true;
+            }
+          }
+          
+          // Method 2: Check container name prefix (fallback)
           const containerName = container.Names[0]?.replace(/^\//, '') || '';
-          return containerName.startsWith(`${stackName}_`);
+          return containerName.startsWith(`${stackName}_`) || containerName === stackName;
         })
         .map(container => this.docker.getContainer(container.Id));
 
@@ -757,24 +764,89 @@ services:
   }>> {
     try {
       const containers = await this.docker.listContainers({ all: true });
-      const stackContainers = containers
-        .filter(container => {
-          const containerName = container.Names[0]?.replace(/^\//, '') || '';
-          return containerName.startsWith(`${stackName}_`);
-        })
-        .map(container => {
-          const containerName = container.Names[0]?.replace(/^\//, '') || '';
-          // Extract service name from container name (format: {project}_{service}_{number})
-          const parts = containerName.split('_');
-          const service = parts.length > 1 ? parts.slice(1, -1).join('_') : undefined;
+      
+      // Docker Compose containers can be matched by:
+      // 1. Container labels (com.docker.compose.project) - most reliable
+      // 2. Container name prefix (project_service_number)
+      const stackContainers: Array<{
+        id: string;
+        name: string;
+        status: string;
+        service?: string;
+      }> = [];
+      
+      for (const container of containers) {
+        const containerName = container.Names[0]?.replace(/^\//, '') || '';
+        let matches = false;
+        let service: string | undefined;
+        
+        // Method 1: Check Docker Compose labels (most reliable)
+        if (container.Labels) {
+          const projectLabel = container.Labels['com.docker.compose.project'];
+          const serviceLabel = container.Labels['com.docker.compose.service'];
           
-          return {
+          if (projectLabel === stackName) {
+            matches = true;
+            service = serviceLabel;
+          }
+        }
+        
+        // Method 2: Check container name prefix (fallback)
+        if (!matches) {
+          // Match containers that start with stackName_ or are exactly stackName
+          if (containerName.startsWith(`${stackName}_`) || containerName === stackName) {
+            matches = true;
+            
+            // Extract service name from container name (format: {project}_{service}_{number})
+            const parts = containerName.split('_');
+            
+            if (parts.length > 2) {
+              // Skip first part (project) and last part (number), join middle parts as service name
+              // Example: "supabase_cmhmow9n9005sjy92qz7mqgoo_db_1" -> service: "db"
+              // But stackName might already include "supabase_", so we need to handle this
+              const stackNameParts = stackName.split('_');
+              if (containerName.startsWith(stackName + '_')) {
+                // Full stack name match: extract everything after stackName_
+                const afterPrefix = containerName.substring(stackName.length + 1);
+                const afterParts = afterPrefix.split('_');
+                if (afterParts.length > 1) {
+                  // Remove the number suffix
+                  service = afterParts.slice(0, -1).join('_');
+                } else {
+                  service = afterParts[0];
+                }
+              } else {
+                // Fallback: use old logic
+                service = parts.slice(1, -1).join('_');
+              }
+            } else if (parts.length === 2) {
+              // Format: {project}_{service} (no number)
+              service = parts[1];
+            }
+          }
+        }
+        
+        if (matches) {
+          stackContainers.push({
             id: container.Id,
             name: containerName,
             status: container.State || 'unknown',
             service
-          };
+          });
+        }
+      }
+
+      console.log(`[COMPOSE] Found ${stackContainers.length} containers for stack: ${stackName}`);
+      if (stackContainers.length === 0) {
+        console.log(`[COMPOSE] No containers found. Searched for prefix: ${stackName}_`);
+        console.log(`[COMPOSE] Checking first 10 containers for debugging:`);
+        containers.slice(0, 10).forEach(c => {
+          const name = c.Names[0]?.replace(/^\//, '') || '';
+          const project = c.Labels?.['com.docker.compose.project'] || 'N/A';
+          const service = c.Labels?.['com.docker.compose.service'] || 'N/A';
+          console.log(`  - Name: ${name}, Project Label: ${project}, Service Label: ${service}`);
         });
+      }
 
       return stackContainers;
     } catch (error) {
@@ -994,7 +1066,7 @@ services:
 
     // Handle main URL routing (if configured)
     const mainConfig = traefikConfig?.['_main'] as { serviceName?: string; internalPort?: number } | undefined;
-    if (mainConfig?.serviceName && mainConfig.internalPort) {
+    if (mainConfig?.serviceName && mainConfig.internalPort !== undefined && mainConfig.internalPort > 0) {
       const mainServiceName = mainConfig.serviceName;
       const mainService = composeData.services[mainServiceName] as any;
       
@@ -1008,23 +1080,38 @@ services:
         const mainRouterName = `${subdomain.replace(/[^a-z0-9]/g, '')}-main`;
         const mainFullDomain = `${subdomain}.${domain}`;
 
-        // Add Traefik labels for main URL
-        mainService.labels['traefik.enable'] = 'true';
-        mainService.labels['traefik.docker.network'] = `${traefikNetwork}`;
-        mainService.labels[`traefik.http.routers.${mainRouterName}.rule`] = `Host(\`${mainFullDomain}\`)`;
-        mainService.labels[`traefik.http.routers.${mainRouterName}.entrypoints`] = 'websecure';
-        mainService.labels[`traefik.http.routers.${mainRouterName}.tls.certresolver`] = 'letsencrypt';
-        mainService.labels[`traefik.http.services.${mainRouterName}.loadbalancer.server.port`] = mainConfig.internalPort.toString();
-        
-        console.log(`[COMPOSE] Configured main URL routing: ${mainFullDomain} → ${mainServiceName}:${mainConfig.internalPort}`);
+        // Ensure internalPort is a number (handle string conversion if needed)
+        const mainInternalPort = typeof mainConfig.internalPort === 'number' 
+          ? mainConfig.internalPort 
+          : parseInt(String(mainConfig.internalPort), 10);
 
-        // Add network to main service
-        if (!mainService.networks) {
-          mainService.networks = [];
+        if (isNaN(mainInternalPort) || mainInternalPort <= 0) {
+          console.warn(`[COMPOSE] Invalid internalPort (${mainConfig.internalPort}) for main service ${mainServiceName}, skipping main URL routing`);
+        } else {
+          // Add Traefik labels for main URL
+          mainService.labels['traefik.enable'] = 'true';
+          mainService.labels['traefik.docker.network'] = `${traefikNetwork}`;
+          mainService.labels[`traefik.http.routers.${mainRouterName}.rule`] = `Host(\`${mainFullDomain}\`)`;
+          mainService.labels[`traefik.http.routers.${mainRouterName}.entrypoints`] = 'websecure';
+          mainService.labels[`traefik.http.routers.${mainRouterName}.tls.certresolver`] = 'letsencrypt';
+          mainService.labels[`traefik.http.services.${mainRouterName}.loadbalancer.server.port`] = mainInternalPort.toString();
+          
+          console.log(`[COMPOSE] Configured main URL routing: ${mainFullDomain} → ${mainServiceName}:${mainInternalPort} (from template Traefik config)`);
+
+          // Add network to main service
+          if (!mainService.networks) {
+            mainService.networks = [];
+          }
+          if (!mainService.networks.includes(traefikNetwork)) {
+            mainService.networks.push(traefikNetwork);
+          }
         }
-        if (!mainService.networks.includes(traefikNetwork)) {
-          mainService.networks.push(traefikNetwork);
-        }
+      } else {
+        console.warn(`[COMPOSE] Main service ${mainServiceName} specified in _main config but not found in compose file services`);
+      }
+    } else {
+      if (traefikConfig && '_main' in traefikConfig) {
+        console.warn(`[COMPOSE] _main config exists but is missing required fields (serviceName: ${mainConfig?.serviceName || 'missing'}, internalPort: ${mainConfig?.internalPort || 'missing'}). Main URL routing will not be configured.`);
       }
     }
 
