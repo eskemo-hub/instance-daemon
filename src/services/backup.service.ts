@@ -290,7 +290,6 @@ export class BackupService {
       db.close();
     }
   }
-}
 
   /**
    * Create a Docker container backup (backup volume data)
