@@ -46,8 +46,9 @@ class DockerManager {
 
   /**
    * Get Docker info
+   * Returns Docker system information
    */
-  async getInfo(): Promise<Docker.DockerInfo> {
+  async getInfo(): Promise<Record<string, unknown>> {
     const docker = this.getDocker();
     return await docker.info();
   }
