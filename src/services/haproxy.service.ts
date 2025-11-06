@@ -103,9 +103,10 @@ export class HAProxyService {
   }
 
   /**
-   * Regenerate complete HAProxy configuration
+   * Regenerate complete HAProxy configuration from existing backends
+   * This can be called manually to update HAProxy config
    */
-  private async regenerateConfig(): Promise<void> {
+  async regenerateConfig(): Promise<void> {
     const backends = this.loadBackends();
     
     // Separate backends by type
@@ -352,3 +353,6 @@ defaults
     return data;
   }
 }
+
+// Export singleton instance
+export const haproxyService = new HAProxyService();

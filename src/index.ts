@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import pinoHttp from 'pino-http';
 import { containerRoutes } from './routes/container.routes';
 import { traefikRoutes } from './routes/traefik.routes';
+import { haproxyRoutes } from './routes/haproxy.routes';
 import { healthRoutes } from './routes/health.routes';
 import backupRoutes from './routes/backup.routes';
 import statsRoutes from './routes/stats.routes';
@@ -92,6 +93,7 @@ app.use('/api/metrics', metricsRoutes);
 // Resource-intensive operations use strict rate limiting
 app.use('/api/containers', authMiddleware, strictRateLimiter, containerRoutes);
 app.use('/api/traefik', authMiddleware, traefikRoutes);
+app.use('/api/haproxy', haproxyRoutes);
 app.use('/api/backup', authMiddleware, strictRateLimiter, backupRoutes);
 app.use('/api/stats', authMiddleware, statsRoutes);
 app.use('/api/api-keys', authMiddleware, apiKeyRoutes);
