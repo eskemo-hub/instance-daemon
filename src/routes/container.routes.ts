@@ -2,6 +2,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { DockerService } from '../services/docker.service';
 import { ContainerConfig } from '../types';
 import { ValidationError } from '../middleware/error.middleware';
+import { createCacheMiddleware, invalidateCache } from '../middleware/cache.middleware';
+import { containerStatusCache } from '../utils/cache';
 
 /**
  * Container management routes
@@ -56,6 +58,9 @@ containerRoutes.post('/:id/start', async (req: Request, res: Response, next: Nex
 
     await dockerService.startContainer(id);
     
+    // Invalidate cache for this container
+    invalidateCache(containerStatusCache, id);
+    
     res.status(200).json({
       success: true,
       message: 'Container started successfully'
@@ -80,6 +85,9 @@ containerRoutes.post('/:id/stop', async (req: Request, res: Response, next: Next
 
     await dockerService.stopContainer(id);
     
+    // Invalidate cache for this container
+    invalidateCache(containerStatusCache, id);
+    
     res.status(200).json({
       success: true,
       message: 'Container stopped successfully'
@@ -103,6 +111,9 @@ containerRoutes.post('/:id/restart', async (req: Request, res: Response, next: N
     }
 
     await dockerService.restartContainer(id);
+    
+    // Invalidate cache for this container
+    invalidateCache(containerStatusCache, id);
     
     res.status(200).json({
       success: true,
@@ -129,6 +140,9 @@ containerRoutes.delete('/:id', async (req: Request, res: Response, next: NextFun
     // Remove container with volumes (Requirement 14.4)
     await dockerService.removeContainer(id, true);
     
+    // Invalidate cache for this container
+    invalidateCache(containerStatusCache, id);
+    
     res.status(200).json({
       success: true,
       message: 'Container and volumes removed successfully'
@@ -143,7 +157,11 @@ containerRoutes.delete('/:id', async (req: Request, res: Response, next: NextFun
  * Get container status
  * Requirements: 6.2, 7.2
  */
-containerRoutes.get('/:id/status', async (req: Request, res: Response, next: NextFunction) => {
+containerRoutes.get('/:id/status', createCacheMiddleware({
+  cache: containerStatusCache,
+  ttl: 10000,
+  keyGenerator: (req) => `container:status:${req.params.id}`
+}), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
 
@@ -206,6 +224,88 @@ containerRoutes.get('/:id/metrics', async (req: Request, res: Response, next: Ne
     res.status(200).json({
       success: true,
       data: metrics
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/containers/:id/update
+ * Update a container by pulling latest image and recreating it
+ */
+containerRoutes.post('/:id/update', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const { image } = req.body;
+
+    if (!id) {
+      throw new ValidationError('Container ID is required');
+    }
+
+    if (!image) {
+      throw new ValidationError('Image name is required');
+    }
+
+    await dockerService.updateContainer(id, image);
+    
+    // Invalidate cache for this container
+    invalidateCache(containerStatusCache, id);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Container updated successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/containers/pull-image
+ * Force pull latest image (without requiring container ID)
+ */
+containerRoutes.post('/pull-image', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { image } = req.body;
+
+    if (!image) {
+      throw new ValidationError('Image name is required');
+    }
+
+    await dockerService.pullImage(image);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Image pulled successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/containers/:id/pull-image
+ * Force pull latest image for a specific container
+ */
+containerRoutes.post('/:id/pull-image', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const { image } = req.body;
+
+    if (!id) {
+      throw new ValidationError('Container ID is required');
+    }
+
+    if (!image) {
+      throw new ValidationError('Image name is required');
+    }
+
+    await dockerService.pullImage(image);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Image pulled successfully'
     });
   } catch (error) {
     next(error);

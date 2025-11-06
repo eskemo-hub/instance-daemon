@@ -1,5 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { HealthService } from '../services/health.service';
+import { createCacheMiddleware } from '../middleware/cache.middleware';
+import { healthMetricsCache } from '../utils/cache';
 
 /**
  * Health check routes
@@ -8,6 +10,12 @@ import { HealthService } from '../services/health.service';
 export const healthRoutes = Router();
 
 const healthService = new HealthService();
+
+// Apply caching middleware (30 second TTL)
+healthRoutes.use(createCacheMiddleware({
+  cache: healthMetricsCache,
+  ttl: 30000
+}));
 
 /**
  * GET /api/health

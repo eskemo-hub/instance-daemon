@@ -5,6 +5,15 @@ import { EventEmitter } from 'events';
 interface PendingRequest {
   resolve: (response: any) => void;
   reject: (error: Error) => void;
+  timestamp: number;
+  timeout: NodeJS.Timeout;
+}
+
+interface QueuedMessage {
+  type: string;
+  payload: any;
+  timestamp: number;
+  retries: number;
 }
 
 /**
@@ -16,8 +25,14 @@ export class TunnelClient extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private pendingRequests: Map<string, PendingRequest> = new Map();
+  private messageQueue: QueuedMessage[] = [];
   private readonly RECONNECT_DELAY = 5000; // 5 seconds
+  private readonly MAX_RECONNECT_DELAY = 60000; // 1 minute max
   private readonly HEARTBEAT_INTERVAL = 30000; // 30 seconds
+  private readonly REQUEST_TIMEOUT = 30000; // 30 seconds
+  private readonly MAX_QUEUE_SIZE = 1000;
+  private readonly MAX_MESSAGE_RETRIES = 3;
+  private reconnectAttempts = 0;
   private isConnecting = false;
   private shouldReconnect = true;
 
@@ -56,6 +71,7 @@ export class TunnelClient extends EventEmitter {
       this.ws.on('close', (code, reason) => this.handleClose(code, reason));
       this.ws.on('error', (error) => this.handleError(error));
       this.ws.on('ping', () => this.handlePing());
+      this.ws.on('pong', () => this.handlePong());
 
     } catch (error) {
       console.error('[TUNNEL-CLIENT] Connection error:', error);
@@ -105,10 +121,14 @@ export class TunnelClient extends EventEmitter {
   private handleOpen(): void {
     console.log('[TUNNEL-CLIENT] Connected to platform tunnel server');
     this.isConnecting = false;
+    this.reconnectAttempts = 0; // Reset reconnect attempts on successful connection
     this.emit('connected');
 
     // Start heartbeat
     this.startHeartbeat();
+
+    // Flush queued messages
+    this.flushMessageQueue();
   }
 
   /**
@@ -170,18 +190,78 @@ export class TunnelClient extends EventEmitter {
    * Send HTTP response back to platform
    */
   private sendResponse(requestId: string, response: any): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.error('[TUNNEL-CLIENT] Cannot send response, tunnel not connected');
-      return;
-    }
-
     const message = {
       type: 'http-response',
       requestId,
       ...response,
     };
 
-    this.ws.send(JSON.stringify(message));
+    this.sendMessage(message);
+  }
+
+  /**
+   * Send message with queuing support
+   */
+  private sendMessage(message: any): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // Queue message if not connected
+      this.queueMessage(message);
+      return;
+    }
+
+    try {
+      this.ws.send(JSON.stringify(message));
+    } catch (error) {
+      console.error('[TUNNEL-CLIENT] Error sending message:', error);
+      this.queueMessage(message);
+    }
+  }
+
+  /**
+   * Queue message for later sending
+   */
+  private queueMessage(message: any): void {
+    if (this.messageQueue.length >= this.MAX_QUEUE_SIZE) {
+      console.warn('[TUNNEL-CLIENT] Message queue full, dropping oldest message');
+      this.messageQueue.shift();
+    }
+
+    this.messageQueue.push({
+      type: message.type,
+      payload: message,
+      timestamp: Date.now(),
+      retries: 0
+    });
+  }
+
+  /**
+   * Flush queued messages
+   */
+  private flushMessageQueue(): void {
+    if (!this.isConnected() || this.messageQueue.length === 0) {
+      return;
+    }
+
+    const messages = [...this.messageQueue];
+    this.messageQueue = [];
+
+    for (const queued of messages) {
+      try {
+        this.ws!.send(JSON.stringify(queued.payload));
+      } catch (error) {
+        // Re-queue if send fails
+        queued.retries++;
+        if (queued.retries < this.MAX_MESSAGE_RETRIES) {
+          this.messageQueue.push(queued);
+        } else {
+          console.error('[TUNNEL-CLIENT] Message dropped after max retries:', queued);
+        }
+      }
+    }
+
+    if (messages.length > 0) {
+      console.log(`[TUNNEL-CLIENT] Flushed ${messages.length} queued messages`);
+    }
   }
 
   /**
@@ -227,18 +307,52 @@ export class TunnelClient extends EventEmitter {
   }
 
   /**
-   * Schedule reconnection attempt
+   * Handle pong from server
+   */
+  private handlePong(): void {
+    // Connection is alive
+  }
+
+  /**
+   * Get connection statistics
+   */
+  getStats(): {
+    connected: boolean;
+    queueSize: number;
+    pendingRequests: number;
+    reconnectAttempts: number;
+  } {
+    return {
+      connected: this.isConnected(),
+      queueSize: this.messageQueue.length,
+      pendingRequests: this.pendingRequests.size,
+      reconnectAttempts: this.reconnectAttempts
+    };
+  }
+
+  /**
+   * Schedule reconnection attempt with exponential backoff
    */
   private scheduleReconnect(): void {
     if (this.reconnectTimer) {
       return;
     }
 
-    console.log(`[TUNNEL-CLIENT] Reconnecting in ${this.RECONNECT_DELAY}ms...`);
+    // Exponential backoff with jitter
+    const baseDelay = Math.min(
+      this.RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts),
+      this.MAX_RECONNECT_DELAY
+    );
+    const jitter = Math.random() * 1000; // Add up to 1 second jitter
+    const delay = baseDelay + jitter;
+
+    this.reconnectAttempts++;
+
+    console.log(`[TUNNEL-CLIENT] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts})...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, this.RECONNECT_DELAY);
+    }, delay);
   }
 
   /**

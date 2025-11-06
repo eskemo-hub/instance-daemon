@@ -13,9 +13,17 @@ import composeRoutes from './routes/compose.routes';
 import updateRoutes from './routes/update.routes';
 import certificateRoutes from './routes/certificates';
 import { cleanupRoutes } from './routes/cleanup.routes';
+import { batchRoutes } from './routes/batch.routes';
+import { jobsRoutes } from './routes/jobs.routes';
+import { configRoutes } from './routes/config.routes';
+import { eventsRoutes } from './routes/events.routes';
+import { statusRoutes } from './routes/status.routes';
 import { authMiddleware } from './middleware/auth.middleware';
 import { errorHandler } from './middleware/error.middleware';
 import { apiRateLimiter, strictRateLimiter, criticalRateLimiter } from './middleware/rate-limit.middleware';
+import { auditMiddleware } from './middleware/audit.middleware';
+import { performanceMiddleware } from './middleware/performance.middleware';
+import { gracefulDegradationMiddleware } from './middleware/graceful-degradation.middleware';
 import { validateEnvironmentOrThrow } from './utils/env-validation';
 import logger from './utils/logger';
 import { dockerManager } from './utils/docker-manager';
@@ -59,11 +67,21 @@ app.use(pinoHttp({
 app.use(cors());
 app.use(express.json());
 
+// Apply audit logging to all routes
+app.use(auditMiddleware);
+
+// Apply performance monitoring to all routes
+app.use(performanceMiddleware);
+
+// Apply graceful degradation to all routes
+app.use(gracefulDegradationMiddleware);
+
 // Apply general rate limiting to all routes
 app.use(apiRateLimiter);
 
 // Public routes (no auth required)
 app.use('/api/health', healthRoutes);
+app.use('/api/status', statusRoutes);
 
 // Protected routes (auth required)
 // Resource-intensive operations use strict rate limiting
@@ -77,6 +95,10 @@ app.use('/api/compose', authMiddleware, strictRateLimiter, composeRoutes);
 app.use('/api/update', authMiddleware, criticalRateLimiter, updateRoutes);
 app.use('/api/certificates', authMiddleware, criticalRateLimiter, certificateRoutes);
 app.use('/api/cleanup', authMiddleware, strictRateLimiter, cleanupRoutes);
+app.use('/api/batch', authMiddleware, strictRateLimiter, batchRoutes);
+app.use('/api/jobs', authMiddleware, jobsRoutes);
+app.use('/api/config', configRoutes);
+app.use('/api/events', eventsRoutes);
 
 // Error handling middleware
 app.use(errorHandler);

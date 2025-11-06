@@ -464,6 +464,40 @@ services:
   }
 
   /**
+   * Update a Docker Compose stack by pulling latest images and recreating containers
+   */
+  async updateStack(stackName: string): Promise<void> {
+    try {
+      const stackDir = path.join(this.COMPOSE_DIR, stackName);
+      const composeFilePath = path.join(stackDir, 'docker-compose.yml');
+
+      if (!fs.existsSync(composeFilePath)) {
+        throw new Error(`Compose stack not found: ${stackName}`);
+      }
+
+      // Pull latest images
+      logger.info({ stackName }, 'Pulling latest images for compose stack');
+      const pullCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" pull`;
+      await execCommand(pullCommand, {
+        cwd: stackDir,
+        timeout: 300000 // 5 minutes timeout for large images
+      });
+
+      // Recreate containers with new images
+      logger.info({ stackName }, 'Recreating containers with updated images');
+      const upCommand = `docker compose -f "${composeFilePath}" -p "${stackName}" up -d`;
+      await execCommand(upCommand, {
+        cwd: stackDir,
+        timeout: 300000 // 5 minutes timeout
+      });
+
+      logger.info({ stackName }, 'Compose stack updated successfully');
+    } catch (error) {
+      throw new Error(`Failed to update compose stack: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  /**
    * Remove a Docker Compose stack
    */
   async removeStack(stackName: string, removeVolumes: boolean = false): Promise<void> {

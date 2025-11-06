@@ -2,6 +2,9 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { ComposeStackService } from '../services/compose-stack.service';
 import { ComposeStackConfig } from '../types';
 import { ValidationError } from '../middleware/error.middleware';
+import { createCacheMiddleware, invalidateCache } from '../middleware/cache.middleware';
+import { composeStackCache } from '../utils/cache';
+import { jobQueueService } from '../services/job-queue.service';
 
 export const composeRoutes = Router();
 const composeStackService = new ComposeStackService();
@@ -9,10 +12,12 @@ const composeStackService = new ComposeStackService();
 /**
  * POST /api/compose
  * Create a new Docker Compose stack
+ * Uses job queue for async processing
  */
 composeRoutes.post('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const config = req.body as ComposeStackConfig;
+    const useQueue = req.query.queue === 'true' || req.body.useQueue === true;
 
     // Validate required fields
     if (!config.name) {
@@ -28,6 +33,21 @@ composeRoutes.post('/', async (req: Request, res: Response, next: NextFunction) 
       throw new ValidationError('Missing or invalid required field: port');
     }
 
+    // Use job queue for long-running operations
+    if (useQueue) {
+      const jobId = await jobQueueService.createJob('compose_create', { config });
+      
+      return res.status(202).json({
+        success: true,
+        message: 'Compose stack creation queued',
+        data: {
+          jobId,
+          status: 'pending'
+        }
+      });
+    }
+
+    // Synchronous execution (for backwards compatibility)
     const stackInfo = await composeStackService.createStack(config);
     
     return res.status(201).json({
@@ -58,6 +78,9 @@ composeRoutes.post('/:stackName/start', async (req: Request, res: Response, next
 
     await composeStackService.startStack(stackName);
     
+    // Invalidate cache for this stack
+    invalidateCache(composeStackCache, stackName);
+    
     return res.json({
       success: true,
       message: `Stack ${stackName} started successfully`
@@ -81,6 +104,9 @@ composeRoutes.post('/:stackName/stop', async (req: Request, res: Response, next:
 
     await composeStackService.stopStack(stackName);
     
+    // Invalidate cache for this stack
+    invalidateCache(composeStackCache, stackName);
+    
     return res.json({
       success: true,
       message: `Stack ${stackName} stopped successfully`
@@ -103,6 +129,9 @@ composeRoutes.post('/:stackName/restart', async (req: Request, res: Response, ne
     }
 
     await composeStackService.restartStack(stackName);
+    
+    // Invalidate cache for this stack
+    invalidateCache(composeStackCache, stackName);
     
     return res.json({
       success: true,
@@ -128,6 +157,9 @@ composeRoutes.delete('/:stackName', async (req: Request, res: Response, next: Ne
 
     await composeStackService.removeStack(stackName, removeVolumes);
     
+    // Invalidate cache for this stack
+    invalidateCache(composeStackCache, stackName);
+    
     return res.json({
       success: true,
       message: `Stack ${stackName} removed successfully`
@@ -141,7 +173,11 @@ composeRoutes.delete('/:stackName', async (req: Request, res: Response, next: Ne
  * GET /api/compose/:stackName/status
  * Get Docker Compose stack status
  */
-composeRoutes.get('/:stackName/status', async (req: Request, res: Response, next: NextFunction) => {
+composeRoutes.get('/:stackName/status', createCacheMiddleware({
+  cache: composeStackCache,
+  ttl: 10000,
+  keyGenerator: (req) => `compose:status:${req.params.stackName}`
+}), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { stackName } = req.params;
 
@@ -310,6 +346,32 @@ composeRoutes.post('/:stackName/services/:serviceName/stop', async (req: Request
     return res.json({
       success: true,
       message: `Service ${serviceName} in stack ${stackName} stopped successfully`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/compose/:stackName/update
+ * Update a Docker Compose stack by pulling latest images and recreating containers
+ */
+composeRoutes.post('/:stackName/update', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { stackName } = req.params;
+
+    if (!stackName) {
+      throw new ValidationError('Missing required parameter: stackName');
+    }
+
+    await composeStackService.updateStack(stackName);
+    
+    // Invalidate cache for this stack
+    invalidateCache(composeStackCache, stackName);
+    
+    return res.json({
+      success: true,
+      message: `Stack ${stackName} updated successfully`
     });
   } catch (error) {
     next(error);
