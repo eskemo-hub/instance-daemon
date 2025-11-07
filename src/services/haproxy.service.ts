@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import logger from '../utils/logger';
 import { CertificateService } from './certificate.service';
+import { DockerService } from './docker.service';
 
 interface DatabaseBackend {
   instanceName: string;
@@ -19,6 +20,7 @@ interface DatabaseBackend {
  * with clean domain names like: mydb.yourdomain.com:5432
  */
 export class HAProxyService {
+  private static schedulerStarted = false;
   private readonly CONFIG_DIR = path.join(process.cwd(), 'haproxy');
   private readonly HAPROXY_CONFIG = path.join(this.CONFIG_DIR, 'haproxy.cfg');
   // Use writable location instead of /etc/haproxy (which might be read-only)
@@ -28,6 +30,9 @@ export class HAProxyService {
   private readonly BACKENDS_FILE = '/opt/n8n-daemon/haproxy/backends.json';
   private readonly CERT_DIR = '/opt/n8n-daemon/haproxy/certs';
   private certificateService: CertificateService;
+  private dockerService: DockerService;
+  private certSyncTimer?: NodeJS.Timeout;
+  private isSyncInProgress = false;
 
   constructor() {
     // Ensure config directory exists
@@ -43,6 +48,9 @@ export class HAProxyService {
       fs.mkdirSync(this.CERT_DIR, { recursive: true, mode: 0o755 });
     }
     this.certificateService = new CertificateService();
+    this.dockerService = new DockerService();
+
+    this.startCertificateSyncTask();
   }
 
   /**
@@ -186,6 +194,146 @@ export class HAProxyService {
    */
   async getDatabaseBackends(): Promise<Record<string, DatabaseBackend>> {
     return this.loadBackends();
+  }
+
+  /**
+   * Synchronize certificates from Traefik ACME store for all known backends
+   * Returns stats and reloads HAProxy if any Let's Encrypt certs changed
+   */
+  async syncTraefikCertificates(): Promise<{
+    domainsProcessed: number;
+    updatedDomains: number;
+    failures: number;
+    restarted: number;
+    restartFailures: number;
+    reloaded: boolean;
+  }> {
+    const backends = this.loadBackends();
+    const processedDomains = new Set<string>();
+
+    let updatedDomains = 0;
+    let failures = 0;
+    let needsReload = false;
+    let restarted = 0;
+    let restartFailures = 0;
+
+    for (const backend of Object.values(backends)) {
+      const domain = backend.domain;
+      if (!domain || processedDomains.has(domain)) {
+        continue;
+      }
+
+      processedDomains.add(domain);
+
+      try {
+        const certResult = await this.certificateService.generateCertificate(backend.instanceName, domain);
+
+        if (certResult.isLetsEncrypt && certResult.updated) {
+          updatedDomains += 1;
+          needsReload = true;
+          logger.info({ domain, instanceName: backend.instanceName, source: certResult.source }, 'Updated Let\'s Encrypt certificate for backend');
+
+          try {
+            await this.dockerService.restartContainer(backend.instanceName);
+            restarted += 1;
+            logger.info({ domain, instanceName: backend.instanceName }, 'Restarted container after certificate update');
+          } catch (restartError) {
+            restartFailures += 1;
+            logger.error(
+              {
+                domain,
+                instanceName: backend.instanceName,
+                error: restartError instanceof Error ? restartError.message : restartError
+              },
+              'Failed to restart container after certificate update'
+            );
+          }
+        }
+      } catch (error) {
+        failures += 1;
+        logger.error(
+          {
+            domain,
+            instanceName: backend.instanceName,
+            error: error instanceof Error ? error.message : error
+          },
+          'Failed to synchronize certificate for backend'
+        );
+      }
+    }
+
+    if (needsReload) {
+      try {
+        await this.reloadHAProxy();
+        logger.info({ updatedDomains }, 'Reloaded HAProxy after certificate updates');
+      } catch (error) {
+        logger.error({ error: error instanceof Error ? error.message : error }, 'Failed to reload HAProxy after certificate updates');
+      }
+    }
+
+    return {
+      domainsProcessed: processedDomains.size,
+      updatedDomains,
+      failures,
+      restarted,
+      restartFailures,
+      reloaded: needsReload
+    };
+  }
+
+  /**
+   * Start background task that periodically syncs certificates from Traefik
+   */
+  private startCertificateSyncTask(): void {
+    if (HAProxyService.schedulerStarted) {
+      return;
+    }
+
+    const disabled = process.env.DISABLE_CERT_AUTO_SYNC === 'true';
+    if (disabled) {
+      logger.info('Automatic certificate sync is disabled via DISABLE_CERT_AUTO_SYNC');
+      HAProxyService.schedulerStarted = true;
+      return;
+    }
+
+    const intervalMinutes = Number(process.env.CERT_SYNC_INTERVAL_MINUTES || '60');
+    const intervalMs = Number.isFinite(intervalMinutes) && intervalMinutes > 0
+      ? intervalMinutes * 60 * 1000
+      : 60 * 60 * 1000;
+
+    const runSync = async () => {
+      if (this.isSyncInProgress) {
+        logger.debug('Certificate sync skipped because previous sync is still running');
+        return;
+      }
+
+      this.isSyncInProgress = true;
+      try {
+        const result = await this.syncTraefikCertificates();
+        if (result.updatedDomains > 0 || result.failures > 0 || result.restartFailures > 0) {
+          logger.info({ result }, 'Certificate sync completed');
+        } else {
+          logger.debug('Certificate sync completed with no changes');
+        }
+      } catch (error) {
+        logger.error({ error: error instanceof Error ? error.message : error }, 'Automatic certificate sync failed');
+      } finally {
+        this.isSyncInProgress = false;
+      }
+    };
+
+    // Schedule periodic sync
+    this.certSyncTimer = setInterval(() => {
+      void runSync();
+    }, intervalMs);
+
+    // Run an initial sync shortly after startup
+    setTimeout(() => {
+      void runSync();
+    }, 30 * 1000);
+
+    HAProxyService.schedulerStarted = true;
+    logger.info({ intervalMinutes: intervalMs / 60 / 1000 }, 'Automatic certificate sync scheduler started');
   }
 
   /**

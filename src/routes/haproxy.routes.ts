@@ -29,6 +29,30 @@ router.post('/regenerate', authMiddleware, async (req, res) => {
 });
 
 /**
+ * POST /api/haproxy/sync-certificates
+ * Synchronize certificates from Traefik ACME store and reload HAProxy if needed
+ */
+router.post('/sync-certificates', authMiddleware, async (req, res) => {
+  try {
+    logger.info('Synchronizing Traefik certificates with HAProxy...');
+    const result = await haproxyService.syncTraefikCertificates();
+    res.json({
+      success: true,
+      message: result.reloaded
+        ? 'Certificates synchronized and HAProxy reloaded'
+        : 'Certificates synchronized (no reload required)',
+      stats: result
+    });
+  } catch (error) {
+    logger.error({ error: error instanceof Error ? error.message : 'Unknown error' }, 'Failed to synchronize certificates');
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to synchronize certificates'
+    });
+  }
+});
+
+/**
  * GET /api/haproxy/status
  * Get HAProxy status and availability
  */

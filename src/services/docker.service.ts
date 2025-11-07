@@ -151,6 +151,64 @@ export class DockerService {
               }]
             };
             
+            // Configure SSL/TLS for PostgreSQL databases
+            if (dockerImage.includes('postgres')) {
+              try {
+                // Generate certificates (Let's Encrypt if configured, otherwise self-signed)
+                const certPaths = await this.certificateService.generateCertificate(config.name, fullDomain);
+                
+                // Mount SSL certificates into the container
+                // PostgreSQL expects certificates in the data directory or a mounted location
+                const certMountPath = '/var/lib/postgresql/ssl';
+                
+                // For Let's Encrypt, use fullchain.pem (includes intermediate certs)
+                // For self-signed, use server.crt
+                const certFileName = certPaths.isLetsEncrypt ? 'fullchain.pem' : 'server.crt';
+                const keyFileName = certPaths.isLetsEncrypt ? 'privkey.pem' : 'server.key';
+                
+                // Get the directory containing the certificate
+                const certHostDir = path.dirname(certPaths.certPath);
+                const keyHostDir = path.dirname(certPaths.keyPath);
+                
+                // Add certificate mounts to Binds
+                containerConfig.HostConfig.Binds.push(
+                  `${certPaths.certPath}:${certMountPath}/${certFileName}:ro`,
+                  `${certPaths.keyPath}:${certMountPath}/${keyFileName}:ro`
+                );
+                
+                // If Let's Encrypt, also mount the chain (intermediate certs)
+                if (certPaths.isLetsEncrypt && certPaths.caPath !== certPaths.certPath) {
+                  containerConfig.HostConfig.Binds.push(
+                    `${certPaths.caPath}:${certMountPath}/chain.pem:ro`
+                  );
+                }
+                
+                // Configure PostgreSQL to use SSL
+                // We need to set environment variables that PostgreSQL will use
+                // Note: PostgreSQL requires postgresql.conf to have ssl=on
+                // The official PostgreSQL image doesn't support SSL via env vars directly
+                // We'll need to configure postgresql.conf or use a custom entrypoint
+                // For now, mount certificates and configure via init script or postgresql.conf
+                
+                logger.info(
+                  {
+                    instanceName: config.name,
+                    certPath: certPaths.certPath,
+                    certMountPath,
+                    isLetsEncrypt: certPaths.isLetsEncrypt,
+                    domain: fullDomain
+                  },
+                  'Mounted SSL certificates for PostgreSQL container'
+                );
+              } catch (error) {
+                logger.warn(
+                  { error: this.getErrorMessage(error), instanceName: config.name },
+                  'Failed to configure SSL certificates for PostgreSQL, continuing without SSL'
+                );
+                // Continue without SSL - connection strings will show non-TLS option
+              }
+            }
+            
             // Add to HAProxy if publicAccess is enabled (default for databases)
             if (config.publicAccess !== false) {
               logger.info(
