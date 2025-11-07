@@ -153,6 +153,16 @@ export class DockerService {
             
             // Add to HAProxy if publicAccess is enabled (default for databases)
             if (config.publicAccess !== false) {
+              logger.info(
+                {
+                  instanceName: config.name,
+                  domain: config.domain,
+                  subdomain: config.subdomain,
+                  port: config.port,
+                  containerPort: internalPort
+                },
+                'Adding database backend to HAProxy'
+              );
               await this.haproxyService.addDatabaseBackend({
                 instanceName: config.name,
                 domain: config.domain,

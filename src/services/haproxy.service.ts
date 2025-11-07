@@ -24,7 +24,8 @@ export class HAProxyService {
   // Use writable location instead of /etc/haproxy (which might be read-only)
   private readonly HAPROXY_SYSTEM_CONFIG = '/opt/n8n-daemon/haproxy/haproxy.cfg';
   private readonly HAPROXY_SYSTEM_DIR = '/opt/n8n-daemon/haproxy';
-  private readonly BACKENDS_FILE = path.join(this.CONFIG_DIR, 'backends.json');
+  // Store backends.json in system location to ensure persistence and consistency
+  private readonly BACKENDS_FILE = '/opt/n8n-daemon/haproxy/backends.json';
   private readonly CERT_DIR = '/opt/n8n-daemon/haproxy/certs';
   private certificateService: CertificateService;
 
@@ -32,6 +33,10 @@ export class HAProxyService {
     // Ensure config directory exists
     if (!fs.existsSync(this.CONFIG_DIR)) {
       fs.mkdirSync(this.CONFIG_DIR, { recursive: true, mode: 0o755 });
+    }
+    // Ensure system directory exists (for backends.json and haproxy.cfg)
+    if (!fs.existsSync(this.HAPROXY_SYSTEM_DIR)) {
+      fs.mkdirSync(this.HAPROXY_SYSTEM_DIR, { recursive: true, mode: 0o755 });
     }
     // Ensure cert directory exists
     if (!fs.existsSync(this.CERT_DIR)) {
@@ -203,11 +208,17 @@ export class HAProxyService {
    * Save backends to JSON file
    */
   private saveBackends(backends: Record<string, DatabaseBackend>): void {
+    // Ensure directory exists before writing
+    const dir = path.dirname(this.BACKENDS_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+    }
     fs.writeFileSync(
       this.BACKENDS_FILE,
       JSON.stringify(backends, null, 2),
       { mode: 0o664 }
     );
+    logger.debug({ backendsFile: this.BACKENDS_FILE, backendCount: Object.keys(backends).length }, 'Saved HAProxy backends');
   }
 
   /**
