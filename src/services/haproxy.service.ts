@@ -191,12 +191,11 @@ defaults
 
 
     // Create frontend for PostgreSQL databases on standard port 5432
-    // All databases use port 5432 externally, HAProxy routes to internal ports
-    // For multiple databases: TLS with SNI is required for proper routing
-    // Non-TLS connections will route to the first database (limitation of TCP routing)
+    // All databases use port 5432 externally, HAProxy routes to internal ports via SNI
+    // For multiple databases: TLS is REQUIRED to prevent routing to wrong container
     if (postgresBackends.length > 0) {
       config += `# PostgreSQL Databases (port 5432)\n`;
-      config += `# External: domain:5432 → HAProxy → Internal: 127.0.0.1:container_port\n`;
+      config += `# External: domain:5432 → HAProxy (SNI routing) → Internal: 127.0.0.1:container_port\n`;
       config += `frontend postgres_frontend\n`;
       config += `    bind *:5432\n`;
       config += `    mode tcp\n`;
@@ -209,18 +208,19 @@ defaults
         config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
       }
 
-      // For non-TLS connections: route to first backend (limitation of TCP mode)
-      // To route non-TLS connections correctly, clients must use TLS with SNI
+      // Handle non-TLS connections based on number of databases
       if (postgresBackends.length === 1) {
+        // Single database: Allow non-TLS (routes to the only backend)
         const backend = postgresBackends[0];
         const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
         config += `    default_backend ${backendName}\n`;
       } else {
-        const defaultBackend = postgresBackends[0];
-        const defaultBackendName = `postgres_${defaultBackend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
-        config += `    default_backend ${defaultBackendName}\n`;
-        config += `    # Note: Non-TLS connections route to first backend (${defaultBackend.domain})\n`;
-        config += `    # For proper multi-database routing, use TLS: postgresql://...?sslmode=require\n`;
+        // Multiple databases: REJECT non-TLS connections to prevent routing to wrong container
+        // TLS with SNI is required for proper routing when multiple databases exist
+        config += `    # Reject non-TLS connections when multiple databases exist\n`;
+        config += `    # This prevents accidental routing to the wrong container\n`;
+        config += `    tcp-request content reject if !{ req_ssl_hello_type 1 }\n`;
+        config += `    # Note: TLS with SNI is REQUIRED. Use: postgresql://...?sslmode=require\n`;
       }
       config += `\n`;
     }
