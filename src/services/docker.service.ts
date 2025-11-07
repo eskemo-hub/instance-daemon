@@ -229,6 +229,15 @@ if ! grep -q "^ssl_key_file" /var/lib/postgresql/data/postgresql.conf; then
   echo "ssl_key_file = 'server.key'" >> /var/lib/postgresql/data/postgresql.conf
 fi
 
+# Update pg_hba.conf to allow connections from HAProxy (127.0.0.1) with trust auth
+# This must come BEFORE the catch-all rule to work correctly
+if ! grep -q "^host.*127.0.0.1/32.*trust" /var/lib/postgresql/data/pg_hba.conf; then
+  # Insert trust rule for 127.0.0.1 before any catch-all rules
+  sed -i '/^host.*all.*all.*all.*scram-sha-256/i host    all             all             127.0.0.1/32            trust' /var/lib/postgresql/data/pg_hba.conf 2>/dev/null || \
+  sed -i '/^host.*all.*all.*0\.0\.0\.0/i host    all             all             127.0.0.1/32            trust' /var/lib/postgresql/data/pg_hba.conf 2>/dev/null || \
+  echo "host    all             all             127.0.0.1/32            trust" >> /var/lib/postgresql/data/pg_hba.conf
+fi
+
 # Update pg_hba.conf to allow SSL connections (if not already present)
 if ! grep -q "hostssl" /var/lib/postgresql/data/pg_hba.conf; then
   echo "hostssl all all 0.0.0.0/0 scram-sha-256" >> /var/lib/postgresql/data/pg_hba.conf
