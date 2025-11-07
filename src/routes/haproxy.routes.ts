@@ -50,5 +50,51 @@ router.get('/status', authMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/haproxy/database/:instanceName/port
+ * Get HAProxy port for a specific database instance
+ */
+router.get('/database/:instanceName/port', authMiddleware, async (req, res) => {
+  try {
+    const { instanceName } = req.params;
+    const port = await haproxyService.getDatabasePort(instanceName);
+    
+    res.json({ 
+      success: true,
+      instanceName,
+      port: port,
+      // If port is null, uses standard port 5432 (TLS or single database)
+      usesStandardPort: port === null
+    });
+  } catch (error) {
+    logger.error({ error: error instanceof Error ? error.message : 'Unknown error' }, 'Failed to get database port');
+    res.status(500).json({ 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Failed to get database port' 
+    });
+  }
+});
+
+/**
+ * GET /api/haproxy/backends
+ * Get all database backends with their port information
+ */
+router.get('/backends', authMiddleware, async (req, res) => {
+  try {
+    const backends = await haproxyService.getDatabaseBackends();
+    
+    res.json({ 
+      success: true,
+      backends: backends
+    });
+  } catch (error) {
+    logger.error({ error: error instanceof Error ? error.message : 'Unknown error' }, 'Failed to get backends');
+    res.status(500).json({ 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Failed to get backends' 
+    });
+  }
+});
+
 export { router as haproxyRoutes };
 

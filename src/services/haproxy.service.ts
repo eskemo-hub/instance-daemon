@@ -7,6 +7,7 @@ interface DatabaseBackend {
   instanceName: string;
   domain: string;
   port: number; // Container's internal port (e.g., 5702)
+  haproxyPort?: number; // HAProxy frontend port for non-TLS (e.g., 5433, 5434) - only set when multiple databases exist
   dbType: 'postgres' | 'mysql' | 'mongodb';
 }
 
@@ -79,6 +80,30 @@ export class HAProxyService {
   }
 
   /**
+   * Get HAProxy port for a database instance (non-TLS port when multiple databases exist)
+   * Returns the port number if assigned, or null if using standard port (single database or TLS)
+   */
+  async getDatabasePort(instanceName: string): Promise<number | null> {
+    const backends = this.loadBackends();
+    const backend = backends[instanceName];
+    
+    if (!backend) {
+      return null;
+    }
+    
+    // Return haproxyPort if set (non-TLS port for multiple databases)
+    // Otherwise return null (uses standard port 5432)
+    return backend.haproxyPort || null;
+  }
+
+  /**
+   * Get all database backends with their port information
+   */
+  async getDatabaseBackends(): Promise<Record<string, DatabaseBackend>> {
+    return this.loadBackends();
+  }
+
+  /**
    * Load backends from JSON file
    */
   private loadBackends(): Record<string, DatabaseBackend> {
@@ -124,8 +149,21 @@ export class HAProxyService {
       }
     }
     
-    // Generate config
+    // Generate config (this may update haproxyPort in postgresBackends)
     const config = this.generateFullConfig(postgresBackends, mysqlBackends);
+    
+    // Save any updated haproxyPort values back to backends
+    const updatedBackends = this.loadBackends();
+    let updated = false;
+    for (const backend of postgresBackends) {
+      if (backend.haproxyPort !== undefined && updatedBackends[backend.instanceName]) {
+        updatedBackends[backend.instanceName].haproxyPort = backend.haproxyPort;
+        updated = true;
+      }
+    }
+    if (updated) {
+      this.saveBackends(updatedBackends);
+    }
     
     // Write config locally first
     fs.writeFileSync(this.HAPROXY_CONFIG, config, { mode: 0o644 });
@@ -190,39 +228,71 @@ defaults
 
 
 
-    // Create frontend for PostgreSQL databases on standard port 5432
-    // All databases use port 5432 externally, HAProxy routes to internal ports via SNI
-    // For multiple databases: TLS is REQUIRED to prevent routing to wrong container
+    // Create frontends for PostgreSQL databases
+    // Strategy:
+    // - Single database: Use port 5432 for both TLS and non-TLS
+    // - Multiple databases: Each gets its own frontend on port 5432 (TLS via SNI) + unique port (non-TLS)
+    //   This ensures both TLS and non-TLS connections route to the correct container
     if (postgresBackends.length > 0) {
-      config += `# PostgreSQL Databases (port 5432)\n`;
-      config += `# External: domain:5432 → HAProxy (SNI routing) → Internal: 127.0.0.1:container_port\n`;
-      config += `frontend postgres_frontend\n`;
-      config += `    bind *:5432\n`;
-      config += `    mode tcp\n`;
-      config += `    tcp-request inspect-delay 5s\n`;
-      config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
-
-      // Route TLS connections via SNI to the correct backend
-      for (const backend of postgresBackends) {
-        const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
-        config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
-      }
-
-      // Handle non-TLS connections based on number of databases
       if (postgresBackends.length === 1) {
-        // Single database: Allow non-TLS (routes to the only backend)
+        // Single database: Use standard port 5432 for both TLS and non-TLS
         const backend = postgresBackends[0];
         const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+        config += `# PostgreSQL Database (port 5432)\n`;
+        config += `# External: ${backend.domain}:5432 → HAProxy → Internal: 127.0.0.1:${backend.port}\n`;
+        config += `frontend postgres_frontend\n`;
+        config += `    bind *:5432\n`;
+        config += `    mode tcp\n`;
+        config += `    tcp-request inspect-delay 5s\n`;
+        config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
+        config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
         config += `    default_backend ${backendName}\n`;
+        config += `\n`;
       } else {
-        // Multiple databases: REJECT non-TLS connections to prevent routing to wrong container
-        // TLS with SNI is required for proper routing when multiple databases exist
-        config += `    # Reject non-TLS connections when multiple databases exist\n`;
-        config += `    # This prevents accidental routing to the wrong container\n`;
-        config += `    tcp-request content reject if !{ req_ssl_hello_type 1 }\n`;
-        config += `    # Note: TLS with SNI is REQUIRED. Use: postgresql://...?sslmode=require\n`;
+        // Multiple databases: Create shared frontend for TLS (SNI routing on port 5432)
+        // AND individual frontends for each database on unique ports for non-TLS
+        config += `# PostgreSQL Databases - TLS/SNI Routing (port 5432)\n`;
+        config += `# TLS connections use SNI to route to correct backend on port 5432\n`;
+        config += `frontend postgres_frontend_tls\n`;
+        config += `    bind *:5432\n`;
+        config += `    mode tcp\n`;
+        config += `    tcp-request inspect-delay 5s\n`;
+        config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
+        
+        // Route TLS connections via SNI
+        for (const backend of postgresBackends) {
+          const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+          config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
+        }
+        config += `\n`;
+        
+        // Create individual frontends for each database on unique ports (for non-TLS)
+        // Port assignment: 5432 (TLS), 5433, 5434, 5435, etc. (non-TLS per database)
+        let portOffset = 1; // Start at 5433 (5432 is for TLS)
+        for (const backend of postgresBackends) {
+          const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+          const uniquePort = 5432 + portOffset;
+          // Store the non-TLS port in the backend for API retrieval
+          backend.haproxyPort = uniquePort;
+          config += `# PostgreSQL: ${backend.instanceName} (${backend.domain}) - Port ${uniquePort} (non-TLS)\n`;
+          config += `# External: ${backend.domain}:${uniquePort} → HAProxy → Internal: 127.0.0.1:${backend.port}\n`;
+          config += `frontend postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}_frontend\n`;
+          config += `    bind *:${uniquePort}\n`;
+          config += `    mode tcp\n`;
+          config += `    default_backend ${backendName}\n`;
+          config += `\n`;
+          portOffset++;
+        }
+        
+        // Save updated backends with haproxyPort
+        const allBackends = this.loadBackends();
+        for (const backend of postgresBackends) {
+          if (allBackends[backend.instanceName] && backend.haproxyPort) {
+            allBackends[backend.instanceName].haproxyPort = backend.haproxyPort;
+          }
+        }
+        this.saveBackends(allBackends);
       }
-      config += `\n`;
     }
 
     // Create a frontend for MySQL databases on standard port 3306
