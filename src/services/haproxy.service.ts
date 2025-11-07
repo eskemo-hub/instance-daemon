@@ -299,10 +299,11 @@ defaults
       } else {
         // Multiple databases: Create shared frontend for TLS (SNI routing on port 5432)
         // AND individual frontends for each database on unique ports for non-TLS
-        config += `# PostgreSQL Databases - Port 5432 (TLS via SNI, non-TLS routes to first backend)\n`;
+        config += `# PostgreSQL Databases - Port 5432 (TLS ONLY via SNI routing)\n`;
         config += `# TLS connections: HAProxy passes through TLS and routes via SNI to correct backend\n`;
-        config += `# Non-TLS connections: Route to first backend (use unique ports for specific databases)\n`;
+        config += `# Non-TLS connections: REJECTED - Use unique ports (5433, 5434, etc.) for non-TLS connections\n`;
         config += `# Note: HAProxy TCP mode passes through TLS - PostgreSQL containers handle TLS termination\n`;
+        config += `# Note: Without SNI, HAProxy cannot route non-TLS connections to correct database\n`;
         config += `frontend postgres_frontend_tls\n`;
         config += `    bind *:5432\n`;
         config += `    mode tcp\n`;
@@ -315,13 +316,11 @@ defaults
           config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
         }
         
-        // For non-TLS connections, route to first backend as default
-        // Users can use unique ports (5433, 5434, etc.) to target specific databases without TLS
-        const firstBackend = postgresBackends[0];
-        const firstBackendName = `postgres_${firstBackend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
-        config += `    default_backend ${firstBackendName}\n`;
-        config += `    # Note: Non-TLS connections on port 5432 route to first backend (${firstBackend.domain})\n`;
-        config += `    # For non-TLS connections to specific databases, use unique ports (5433, 5434, etc.)\n`;
+        // Reject non-TLS connections on port 5432
+        // Without SNI, we can't route non-TLS to the correct database
+        // Users must use unique ports (5433, 5434, etc.) for non-TLS connections
+        config += `    # Reject non-TLS connections - they would route to wrong database\n`;
+        config += `    tcp-request content reject unless { req_ssl_hello_type 1 }\n`;
         config += `\n`;
         
         // Create individual frontends for each database on unique ports (for non-TLS)
