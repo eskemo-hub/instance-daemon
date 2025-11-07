@@ -339,9 +339,14 @@ defaults
           }
         }
         
-        if (certPaths.length > 0) {
-          // Bind with all certificates (HAProxy will use SNI to select the right one)
-          config += `    bind *:5432 ssl crt ${certPaths.join(' ')}\n`;
+        if (certPaths.length === 1) {
+          // Single certificate: simple bind
+          config += `    bind *:5432 ssl crt ${certPaths[0]}\n`;
+        } else if (certPaths.length > 1) {
+          // Multiple certificates: use directory approach
+          // HAProxy will load all .pem files from the directory and use SNI to select
+          // Note: Directory must end without trailing slash for HAProxy
+          config += `    bind *:5432 ssl crt ${this.CERT_DIR}\n`;
         } else {
           // No certificates: passthrough mode (read SNI but don't terminate)
           config += `    bind *:5432\n`;
