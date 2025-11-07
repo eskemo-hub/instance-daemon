@@ -309,6 +309,8 @@ defaults
         config += `frontend postgres_frontend\n`;
         if (certExists) {
           // TLS termination: HAProxy handles TLS, connects to backend in plain TCP
+          // Note: When ssl crt is used, HAProxy ONLY accepts TLS connections
+          // Non-TLS connections will be rejected - clients must use sslmode=require
           config += `    bind *:5432 ssl crt ${certPath}\n`;
         } else {
           // No certificate: accept both TLS and non-TLS (passthrough)
