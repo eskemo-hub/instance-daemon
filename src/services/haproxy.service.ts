@@ -347,9 +347,9 @@ defaults
           portOffset++;
         }
         
-        // Save updated backends with haproxyPort
+        // Save updated backends with haproxyPort (use sortedBackends to match port assignment)
         const allBackends = this.loadBackends();
-        for (const backend of postgresBackends) {
+        for (const backend of sortedBackends) {
           if (allBackends[backend.instanceName] && backend.haproxyPort) {
             allBackends[backend.instanceName].haproxyPort = backend.haproxyPort;
           }
