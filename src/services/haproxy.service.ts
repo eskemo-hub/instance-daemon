@@ -190,18 +190,115 @@ export class HAProxyService {
 
   /**
    * Load backends from JSON file
+   * If file doesn't exist, try to rebuild it from HAProxy config
    */
   private loadBackends(): Record<string, DatabaseBackend> {
     if (!fs.existsSync(this.BACKENDS_FILE)) {
+      // Try to rebuild from existing HAProxy config
+      logger.warn({ backendsFile: this.BACKENDS_FILE }, 'backends.json not found, attempting to rebuild from HAProxy config');
+      const rebuilt = this.rebuildBackendsFromConfig();
+      if (Object.keys(rebuilt).length > 0) {
+        logger.info({ backendCount: Object.keys(rebuilt).length }, 'Rebuilt backends.json from HAProxy config');
+        this.saveBackends(rebuilt);
+        return rebuilt;
+      }
       return {};
     }
     
     try {
       const data = fs.readFileSync(this.BACKENDS_FILE, 'utf-8');
       return JSON.parse(data);
-    } catch {
+    } catch (error) {
+      logger.error({ error, backendsFile: this.BACKENDS_FILE }, 'Failed to load backends.json, attempting to rebuild from HAProxy config');
+      // Try to rebuild from HAProxy config as fallback
+      const rebuilt = this.rebuildBackendsFromConfig();
+      if (Object.keys(rebuilt).length > 0) {
+        logger.info({ backendCount: Object.keys(rebuilt).length }, 'Rebuilt backends.json from HAProxy config after parse error');
+        this.saveBackends(rebuilt);
+        return rebuilt;
+      }
       return {};
     }
+  }
+
+  /**
+   * Rebuild backends from existing HAProxy configuration
+   * This is useful when backends.json is missing or corrupted
+   */
+  private rebuildBackendsFromConfig(): Record<string, DatabaseBackend> {
+    const backends: Record<string, DatabaseBackend> = {};
+
+    if (!fs.existsSync(this.HAPROXY_SYSTEM_CONFIG)) {
+      logger.warn({ configFile: this.HAPROXY_SYSTEM_CONFIG }, 'HAProxy config not found, cannot rebuild backends');
+      return backends;
+    }
+
+    try {
+      const configContent = fs.readFileSync(this.HAPROXY_SYSTEM_CONFIG, 'utf-8');
+
+      // Extract PostgreSQL backends: backend postgres_XXX ... server YYY 127.0.0.1:PORT
+      const postgresBackendRegex = /backend postgres_([^\s]+)\s+mode tcp\s+option tcp-check\s+server ([^\s]+) 127.0.0.1:(\d+) check/g;
+      const postgresUseBackendRegex = /use_backend postgres_([^\s]+) if \{ req\.ssl_sni -i ([^\s]+) \}/g;
+
+      // Map backend names to domains
+      const backendToDomain: Record<string, string> = {};
+      let match;
+      while ((match = postgresUseBackendRegex.exec(configContent)) !== null) {
+        const backendName = match[1];
+        const domain = match[2];
+        backendToDomain[backendName] = domain;
+      }
+
+      // Extract backend server definitions
+      while ((match = postgresBackendRegex.exec(configContent)) !== null) {
+        const backendName = match[1];
+        const instanceName = match[2];
+        const port = parseInt(match[3], 10);
+
+        const domain = backendToDomain[backendName] || null;
+
+        if (instanceName && port && !isNaN(port)) {
+          backends[instanceName] = {
+            instanceName: instanceName,
+            domain: domain || `unknown-${instanceName}`,
+            port: port,
+            dbType: 'postgres'
+          };
+        }
+      }
+
+      // Extract MySQL backends (similar pattern)
+      const mysqlBackendRegex = /backend mysql_([^\s]+)\s+mode tcp\s+option tcp-check\s+server ([^\s]+) 127.0.0.1:(\d+) check/g;
+      const mysqlUseBackendRegex = /use_backend mysql_([^\s]+) if \{ req\.ssl_sni -i ([^\s]+) \}/g;
+
+      const mysqlBackendToDomain: Record<string, string> = {};
+      while ((match = mysqlUseBackendRegex.exec(configContent)) !== null) {
+        const backendName = match[1];
+        const domain = match[2];
+        mysqlBackendToDomain[backendName] = domain;
+      }
+
+      while ((match = mysqlBackendRegex.exec(configContent)) !== null) {
+        const backendName = match[1];
+        const instanceName = match[2];
+        const port = parseInt(match[3], 10);
+
+        const domain = mysqlBackendToDomain[backendName] || null;
+
+        if (instanceName && port && !isNaN(port)) {
+          backends[instanceName] = {
+            instanceName: instanceName,
+            domain: domain || `unknown-${instanceName}`,
+            port: port,
+            dbType: 'mysql'
+          };
+        }
+      }
+    } catch (error) {
+      logger.error({ error }, 'Failed to rebuild backends from HAProxy config');
+    }
+
+    return backends;
   }
 
   /**
