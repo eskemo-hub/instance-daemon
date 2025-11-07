@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import logger from '../utils/logger';
 import { CertificateService } from './certificate.service';
-import { DockerService } from './docker.service';
+import type { DockerService } from './docker.service';
 
 interface DatabaseBackend {
   instanceName: string;
@@ -30,7 +30,7 @@ export class HAProxyService {
   private readonly BACKENDS_FILE = '/opt/n8n-daemon/haproxy/backends.json';
   private readonly CERT_DIR = '/opt/n8n-daemon/haproxy/certs';
   private certificateService: CertificateService;
-  private dockerService: DockerService;
+  private dockerService?: DockerService;
   private certSyncTimer?: NodeJS.Timeout;
   private isSyncInProgress = false;
 
@@ -48,9 +48,12 @@ export class HAProxyService {
       fs.mkdirSync(this.CERT_DIR, { recursive: true, mode: 0o755 });
     }
     this.certificateService = new CertificateService();
-    this.dockerService = new DockerService();
 
     this.startCertificateSyncTask();
+  }
+
+  setDockerService(dockerService: DockerService): void {
+    this.dockerService = dockerService;
   }
 
   /**
@@ -233,20 +236,24 @@ export class HAProxyService {
           needsReload = true;
           logger.info({ domain, instanceName: backend.instanceName, source: certResult.source }, 'Updated Let\'s Encrypt certificate for backend');
 
-          try {
-            await this.dockerService.restartContainer(backend.instanceName);
-            restarted += 1;
-            logger.info({ domain, instanceName: backend.instanceName }, 'Restarted container after certificate update');
-          } catch (restartError) {
-            restartFailures += 1;
-            logger.error(
-              {
-                domain,
-                instanceName: backend.instanceName,
-                error: restartError instanceof Error ? restartError.message : restartError
-              },
-              'Failed to restart container after certificate update'
-            );
+          if (this.dockerService) {
+            try {
+              await this.dockerService.restartContainer(backend.instanceName);
+              restarted += 1;
+              logger.info({ domain, instanceName: backend.instanceName }, 'Restarted container after certificate update');
+            } catch (restartError) {
+              restartFailures += 1;
+              logger.error(
+                {
+                  domain,
+                  instanceName: backend.instanceName,
+                  error: restartError instanceof Error ? restartError.message : restartError
+                },
+                'Failed to restart container after certificate update'
+              );
+            }
+          } else {
+            logger.warn({ domain, instanceName: backend.instanceName }, 'DockerService not available, skipping container restart after certificate update');
           }
         }
       } catch (error) {

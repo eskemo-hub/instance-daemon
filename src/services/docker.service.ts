@@ -1,7 +1,8 @@
 import Docker from 'dockerode';
 import { ContainerConfig, ContainerInfo, ContainerStatus } from '../types';
 import { CertificateService } from './certificate.service';
-import { HAProxyService } from './haproxy.service';
+import { haproxyService } from './haproxy.service';
+import type { HAProxyService } from './haproxy.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import logger from '../utils/logger';
@@ -31,7 +32,8 @@ export class DockerService {
 
   constructor() {
     this.certificateService = new CertificateService();
-    this.haproxyService = new HAProxyService();
+    this.haproxyService = haproxyService;
+    this.haproxyService.setDockerService(this);
   }
 
   /**
