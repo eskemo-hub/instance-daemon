@@ -13,6 +13,17 @@ interface DatabaseBackend {
   dbType: 'postgres' | 'mysql' | 'mongodb';
 }
 
+type CertificateSyncTrigger = 'scheduled' | 'immediate' | 'manual';
+
+interface CertificateSyncStats {
+  domainsProcessed: number;
+  updatedDomains: number;
+  failures: number;
+  restarted: number;
+  restartFailures: number;
+  reloaded: boolean;
+}
+
 /**
  * HAProxyService manages HAProxy configuration for database routing
  * 
@@ -32,6 +43,8 @@ export class HAProxyService {
   private certificateService: CertificateService;
   private dockerService?: DockerService;
   private certSyncTimer?: NodeJS.Timeout;
+  private immediateSyncTimer?: NodeJS.Timeout;
+  private schedulerEnabled = false;
   private isSyncInProgress = false;
 
   constructor() {
@@ -156,6 +169,9 @@ export class HAProxyService {
     
     // Regenerate HAProxy config
     await this.regenerateConfig();
+
+    // Schedule an immediate certificate sync so Let’s Encrypt certs are pulled right away
+    this.scheduleImmediateCertificateSync();
   }
 
   /**
@@ -288,6 +304,31 @@ export class HAProxyService {
     };
   }
 
+  private async performCertificateSync(trigger: CertificateSyncTrigger): Promise<CertificateSyncStats | null> {
+    if (this.isSyncInProgress) {
+      logger.debug({ trigger }, 'Certificate sync skipped because another sync is in progress');
+      return null;
+    }
+
+    this.isSyncInProgress = true;
+    try {
+      const result = await this.syncTraefikCertificates();
+
+      if (result.updatedDomains > 0 || result.failures > 0 || result.restartFailures > 0) {
+        logger.info({ trigger, result }, 'Certificate sync completed');
+      } else {
+        logger.debug({ trigger }, 'Certificate sync completed with no changes');
+      }
+
+      return result;
+    } catch (error) {
+      logger.error({ trigger, error: error instanceof Error ? error.message : error }, 'Certificate sync failed');
+      return null;
+    } finally {
+      this.isSyncInProgress = false;
+    }
+  }
+
   /**
    * Start background task that periodically syncs certificates from Traefik
    */
@@ -300,6 +341,7 @@ export class HAProxyService {
     if (disabled) {
       logger.info('Automatic certificate sync is disabled via DISABLE_CERT_AUTO_SYNC');
       HAProxyService.schedulerStarted = true;
+      this.schedulerEnabled = false;
       return;
     }
 
@@ -308,39 +350,35 @@ export class HAProxyService {
       ? intervalMinutes * 60 * 1000
       : 60 * 60 * 1000;
 
-    const runSync = async () => {
-      if (this.isSyncInProgress) {
-        logger.debug('Certificate sync skipped because previous sync is still running');
-        return;
-      }
-
-      this.isSyncInProgress = true;
-      try {
-        const result = await this.syncTraefikCertificates();
-        if (result.updatedDomains > 0 || result.failures > 0 || result.restartFailures > 0) {
-          logger.info({ result }, 'Certificate sync completed');
-        } else {
-          logger.debug('Certificate sync completed with no changes');
-        }
-      } catch (error) {
-        logger.error({ error: error instanceof Error ? error.message : error }, 'Automatic certificate sync failed');
-      } finally {
-        this.isSyncInProgress = false;
-      }
-    };
-
     // Schedule periodic sync
     this.certSyncTimer = setInterval(() => {
-      void runSync();
+      void this.performCertificateSync('scheduled');
     }, intervalMs);
 
     // Run an initial sync shortly after startup
     setTimeout(() => {
-      void runSync();
+      void this.performCertificateSync('scheduled');
     }, 30 * 1000);
 
+    this.schedulerEnabled = true;
     HAProxyService.schedulerStarted = true;
     logger.info({ intervalMinutes: intervalMs / 60 / 1000 }, 'Automatic certificate sync scheduler started');
+  }
+
+  private scheduleImmediateCertificateSync(delayMs: number = 5_000): void {
+    if (this.immediateSyncTimer) {
+      clearTimeout(this.immediateSyncTimer);
+    }
+
+    this.immediateSyncTimer = setTimeout(() => {
+      void this.performCertificateSync('immediate');
+    }, delayMs);
+
+    logger.debug({ delayMs }, 'Scheduled immediate certificate sync');
+  }
+
+  async triggerManualCertificateSync(): Promise<CertificateSyncStats | null> {
+    return this.performCertificateSync('manual');
   }
 
   /**

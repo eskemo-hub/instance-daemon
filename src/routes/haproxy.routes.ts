@@ -35,7 +35,15 @@ router.post('/regenerate', authMiddleware, async (req, res) => {
 router.post('/sync-certificates', authMiddleware, async (req, res) => {
   try {
     logger.info('Synchronizing Traefik certificates with HAProxy...');
-    const result = await haproxyService.syncTraefikCertificates();
+    const result = await haproxyService.triggerManualCertificateSync();
+
+    if (!result) {
+      return res.json({
+        success: true,
+        message: 'Certificate sync already in progress'
+      });
+    }
+ 
     res.json({
       success: true,
       message: result.reloaded

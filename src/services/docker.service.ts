@@ -212,26 +212,7 @@ export class DockerService {
             }
             
             // Add to HAProxy if publicAccess is enabled (default for databases)
-            if (config.publicAccess !== false) {
-              logger.info(
-                {
-                  instanceName: config.name,
-                  domain: config.domain,
-                  subdomain: config.subdomain,
-                  port: config.port,
-                  containerPort: internalPort
-                },
-                'Adding database backend to HAProxy'
-              );
-              await this.haproxyService.addDatabaseBackend({
-                instanceName: config.name,
-                domain: config.domain,
-                subdomain: config.subdomain,
-                port: config.port,
-                dbType: dockerImage.includes('postgres') ? 'postgres' : 
-                        dockerImage.includes('mongo') ? 'mongodb' : 'mysql',
-              });
-            }
+            // Note: We'll add this after container creation so we can use the actual port
           } else {
             // Web application: Use Traefik HTTP routing with Let's Encrypt
             containerConfig.Labels = {
@@ -274,6 +255,27 @@ export class DockerService {
 
         const containerInfo = await container.inspect();
 
+        // Extract the actual bound port from the container's network settings
+        // Docker might assign a different port if the requested port is in use
+        let actualPort = config.port;
+        if (containerInfo.NetworkSettings?.Ports) {
+          const portBindings = containerInfo.NetworkSettings.Ports[`${internalPort}/tcp`];
+          if (portBindings && portBindings.length > 0 && portBindings[0].HostPort) {
+            const boundPort = parseInt(portBindings[0].HostPort, 10);
+            if (!isNaN(boundPort) && boundPort !== config.port) {
+              logger.warn(
+                {
+                  requestedPort: config.port,
+                  actualPort: boundPort,
+                  containerName: config.name
+                },
+                'Container bound to different port than requested'
+              );
+              actualPort = boundPort;
+            }
+          }
+        }
+
         // Extract the actual volume name from the container mounts
         let actualVolumeName = config.volumeName;
         if (containerInfo.Mounts && containerInfo.Mounts.length > 0) {
@@ -285,15 +287,34 @@ export class DockerService {
           }
         }
 
-        // Note: HAProxy routing for databases is NOT added during creation
-        // It's only added when public access is explicitly enabled via the API
-        // This ensures databases are private by default
+        // Add to HAProxy if publicAccess is enabled (default for databases)
+        // Do this AFTER getting actual port so HAProxy uses the correct port
+        if (config.isDatabase && config.publicAccess !== false && config.useTraefik && config.domain && config.subdomain) {
+          logger.info(
+            {
+              instanceName: config.name,
+              domain: config.domain,
+              subdomain: config.subdomain,
+              port: actualPort,
+              containerPort: internalPort
+            },
+            'Adding database backend to HAProxy with actual port'
+          );
+          await this.haproxyService.addDatabaseBackend({
+            instanceName: config.name,
+            domain: config.domain,
+            subdomain: config.subdomain,
+            port: actualPort, // Use actual port, not requested port
+            dbType: dockerImage.includes('postgres') ? 'postgres' : 
+                    dockerImage.includes('mongo') ? 'mongodb' : 'mysql',
+          });
+        }
 
         return {
           containerId: containerInfo.Id,
           name: containerInfo.Name.replace(/^\//, ''),
           status: containerInfo.State.Status,
-          port: config.port,
+          port: actualPort,
           volumeName: actualVolumeName,
           apiKey: apiKey, // Return the generated API key
         };
