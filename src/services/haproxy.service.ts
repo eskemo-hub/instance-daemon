@@ -6,7 +6,7 @@ import logger from '../utils/logger';
 interface DatabaseBackend {
   instanceName: string;
   domain: string;
-  port: number;
+  port: number; // Container's internal port (e.g., 5702)
   dbType: 'postgres' | 'mysql' | 'mongodb';
 }
 
@@ -112,15 +112,15 @@ export class HAProxyService {
   async regenerateConfig(): Promise<void> {
     const backends = this.loadBackends();
     
-    // Separate backends by type
+    // Separate backends by type (create copies to avoid mutating originals)
     const postgresBackends: DatabaseBackend[] = [];
     const mysqlBackends: DatabaseBackend[] = [];
     
     for (const backend of Object.values(backends)) {
       if (backend.dbType === 'postgres') {
-        postgresBackends.push(backend);
+        postgresBackends.push({ ...backend });
       } else {
-        mysqlBackends.push(backend);
+        mysqlBackends.push({ ...backend });
       }
     }
     
@@ -190,38 +190,37 @@ defaults
 
 
 
-    // Create a frontend for each PostgreSQL database on standard port 5432
-    // Enable TLS SNI-based routing to direct connections by domain
+    // Create frontend for PostgreSQL databases on standard port 5432
+    // All databases use port 5432 externally, HAProxy routes to internal ports
+    // For multiple databases: TLS with SNI is required for proper routing
+    // Non-TLS connections will route to the first database (limitation of TCP routing)
     if (postgresBackends.length > 0) {
       config += `# PostgreSQL Databases (port 5432)\n`;
+      config += `# External: domain:5432 → HAProxy → Internal: 127.0.0.1:container_port\n`;
       config += `frontend postgres_frontend\n`;
       config += `    bind *:5432\n`;
       config += `    mode tcp\n`;
       config += `    tcp-request inspect-delay 5s\n`;
       config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
 
-      // Route based on SNI to the correct backend (for TLS connections)
+      // Route TLS connections via SNI to the correct backend
       for (const backend of postgresBackends) {
         const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
         config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
       }
 
-      // For non-TLS connections or when SNI doesn't match:
-      // If only one backend, use it as default (works for both TLS and non-TLS)
+      // For non-TLS connections: route to first backend (limitation of TCP mode)
+      // To route non-TLS connections correctly, clients must use TLS with SNI
       if (postgresBackends.length === 1) {
         const backend = postgresBackends[0];
         const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
         config += `    default_backend ${backendName}\n`;
-      } else if (postgresBackends.length > 1) {
-        // Multiple backends: Use first backend as default for non-TLS connections
-        // TLS connections will still route via SNI, non-TLS will go to first backend
-        // Note: This means non-TLS connections can't distinguish between databases
-        // For proper multi-database routing, clients should use TLS with SNI
+      } else {
         const defaultBackend = postgresBackends[0];
         const defaultBackendName = `postgres_${defaultBackend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
         config += `    default_backend ${defaultBackendName}\n`;
         config += `    # Note: Non-TLS connections route to first backend (${defaultBackend.domain})\n`;
-        config += `    # For proper routing, use TLS with SNI matching the domain\n`;
+        config += `    # For proper multi-database routing, use TLS: postgresql://...?sslmode=require\n`;
       }
       config += `\n`;
     }
