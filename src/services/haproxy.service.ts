@@ -299,8 +299,9 @@ defaults
       } else {
         // Multiple databases: Create shared frontend for TLS (SNI routing on port 5432)
         // AND individual frontends for each database on unique ports for non-TLS
-        config += `# PostgreSQL Databases - TLS/SNI Routing (port 5432)\n`;
+        config += `# PostgreSQL Databases - Port 5432 (TLS via SNI, non-TLS routes to first backend)\n`;
         config += `# TLS connections: HAProxy passes through TLS and routes via SNI to correct backend\n`;
+        config += `# Non-TLS connections: Route to first backend (use unique ports for specific databases)\n`;
         config += `# Note: HAProxy TCP mode passes through TLS - PostgreSQL containers handle TLS termination\n`;
         config += `frontend postgres_frontend_tls\n`;
         config += `    bind *:5432\n`;
@@ -313,6 +314,14 @@ defaults
           const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
           config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
         }
+        
+        // For non-TLS connections, route to first backend as default
+        // Users can use unique ports (5433, 5434, etc.) to target specific databases without TLS
+        const firstBackend = postgresBackends[0];
+        const firstBackendName = `postgres_${firstBackend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+        config += `    default_backend ${firstBackendName}\n`;
+        config += `    # Note: Non-TLS connections on port 5432 route to first backend (${firstBackend.domain})\n`;
+        config += `    # For non-TLS connections to specific databases, use unique ports (5433, 5434, etc.)\n`;
         config += `\n`;
         
         // Create individual frontends for each database on unique ports (for non-TLS)
