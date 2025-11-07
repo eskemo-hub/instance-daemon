@@ -316,11 +316,15 @@ defaults
           config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
         }
         
-        // Reject non-TLS connections on port 5432
-        // Without SNI, we can't route non-TLS to the correct database
-        // Users must use unique ports (5433, 5434, etc.) for non-TLS connections
-        config += `    # Reject non-TLS connections - they would route to wrong database\n`;
-        config += `    tcp-request content reject unless { req_ssl_hello_type 1 }\n`;
+        // For non-TLS connections, route to first backend as default
+        // WARNING: Non-TLS connections on port 5432 will route to FIRST database (${postgresBackends[0].domain})
+        // For non-TLS connections to specific databases, use unique ports (5433, 5434, etc.)
+        // TLS connections route correctly via SNI to the matching domain
+        const firstBackend = postgresBackends[0];
+        const firstBackendName = `postgres_${firstBackend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+        config += `    default_backend ${firstBackendName}\n`;
+        config += `    # WARNING: Non-TLS on port 5432 routes to first backend (${firstBackend.domain})\n`;
+        config += `    # Use unique ports (5433, 5434, etc.) for non-TLS connections to specific databases\n`;
         config += `\n`;
         
         // Create individual frontends for each database on unique ports (for non-TLS)
