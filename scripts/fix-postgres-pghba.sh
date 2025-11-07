@@ -79,7 +79,15 @@ else
 fi
 echo ""
 
-echo "5. Verifying new configuration..."
+echo "5. Testing connection (no password needed with trust auth)..."
+if sudo docker exec "$CONTAINER_NAME" psql -U postgres -d postgres -c "SELECT current_database(), current_user;" 2>&1; then
+  echo "  ✅ Local connection works"
+else
+  echo "  ⚠️  Local connection test failed"
+fi
+echo ""
+
+echo "6. Verifying new configuration..."
 sudo docker exec "$CONTAINER_NAME" tail -10 "$PGHBA_PATH" 2>/dev/null || echo "  Could not verify"
 echo ""
 
@@ -88,11 +96,18 @@ echo "Fix Complete"
 echo "=========================================="
 echo ""
 echo "Now test the connection:"
-echo "  psql \"postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5702/postgres\""
-echo "  or via HAProxy:"
-echo "  psql \"postgresql://postgres:YOUR_PASSWORD@36-cmhmoqju.hostinau.com:5435/postgres\""
 echo ""
-echo "Note: With 'trust' authentication for 127.0.0.1, the password might be ignored."
-echo "This is expected for localhost connections."
+echo "Option 1: Test from inside container (bypass HAProxy):"
+echo "  sudo docker exec -it $CONTAINER_NAME psql -U postgres -d postgres"
+echo ""
+echo "Option 2: Test via HAProxy using docker exec:"
+echo "  sudo docker run --rm --network host postgres:16-alpine psql \"postgresql://postgres@36-cmhmoqju.hostinau.com:5435/postgres\""
+echo ""
+echo "Option 3: Install psql on host:"
+echo "  sudo apt-get update && sudo apt-get install -y postgresql-client"
+echo "  Then: psql \"postgresql://postgres@36-cmhmoqju.hostinau.com:5435/postgres\""
+echo ""
+echo "Note: With 'trust' authentication for 127.0.0.1, no password is needed."
+echo "This allows HAProxy connections to work without password issues."
 echo ""
 
