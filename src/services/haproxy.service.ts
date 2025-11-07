@@ -79,6 +79,44 @@ export class HAProxyService {
     // Load existing backends
     const backends = this.loadBackends();
     
+    // Check if a backend with the same domain already exists (different instanceName)
+    // This prevents overwriting backends when instanceName might not be unique
+    const existingBackendByDomain = Object.values(backends).find(
+      (backend) => backend.domain === fullDomain && backend.instanceName !== config.instanceName
+    );
+    
+    if (existingBackendByDomain) {
+      logger.warn(
+        {
+          existingInstanceName: existingBackendByDomain.instanceName,
+          newInstanceName: config.instanceName,
+          domain: fullDomain,
+          existingPort: existingBackendByDomain.port,
+          newPort: config.port
+        },
+        'Backend with same domain but different instanceName exists. Removing old backend and adding new one.'
+      );
+      // Remove the old backend with the same domain
+      delete backends[existingBackendByDomain.instanceName];
+    }
+    
+    // Check if a backend with the same instanceName exists but different domain/port
+    const existingBackendByName = backends[config.instanceName];
+    if (existingBackendByName) {
+      if (existingBackendByName.domain !== fullDomain || existingBackendByName.port !== config.port) {
+        logger.warn(
+          {
+            instanceName: config.instanceName,
+            existingDomain: existingBackendByName.domain,
+            newDomain: fullDomain,
+            existingPort: existingBackendByName.port,
+            newPort: config.port
+          },
+          'Backend with same instanceName but different domain/port exists. Updating backend.'
+        );
+      }
+    }
+    
     // Add or update backend
     backends[config.instanceName] = {
       instanceName: config.instanceName,
@@ -86,6 +124,16 @@ export class HAProxyService {
       port: config.port,
       dbType: config.dbType
     };
+    
+    logger.info(
+      {
+        instanceName: config.instanceName,
+        domain: fullDomain,
+        port: config.port,
+        dbType: config.dbType
+      },
+      'Adding/updating HAProxy backend'
+    );
     
     // Save backends
     this.saveBackends(backends);
