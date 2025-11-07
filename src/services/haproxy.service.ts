@@ -329,8 +329,10 @@ defaults
         
         // Create individual frontends for each database on unique ports (for non-TLS)
         // Port assignment: 5432 (TLS), 5433, 5434, 5435, etc. (non-TLS per database)
+        // IMPORTANT: Sort backends by instanceName to ensure consistent port assignment
+        const sortedBackends = [...postgresBackends].sort((a, b) => a.instanceName.localeCompare(b.instanceName));
         let portOffset = 1; // Start at 5433 (5432 is for TLS)
-        for (const backend of postgresBackends) {
+        for (const backend of sortedBackends) {
           const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
           const uniquePort = 5432 + portOffset;
           // Store the non-TLS port in the backend for API retrieval
