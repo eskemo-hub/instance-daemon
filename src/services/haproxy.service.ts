@@ -159,10 +159,36 @@ export class HAProxyService {
         instanceName: config.instanceName,
         domain: fullDomain,
         port: config.port,
-        dbType: config.dbType
+        dbType: config.dbType,
+        subdomain: config.subdomain,
+        baseDomain: config.domain
       },
       'Adding/updating HAProxy backend'
     );
+    
+    // Validate: Ensure no other backend has the same domain but different instance/port
+    const conflictingBackend = Object.values(backends).find(
+      (backend) => backend.domain === fullDomain && 
+                   backend.instanceName !== config.instanceName &&
+                   (backend.port !== config.port || backend.instanceName !== config.instanceName)
+    );
+    
+    if (conflictingBackend) {
+      logger.error(
+        {
+          newInstance: config.instanceName,
+          newDomain: fullDomain,
+          newPort: config.port,
+          conflictingInstance: conflictingBackend.instanceName,
+          conflictingPort: conflictingBackend.port
+        },
+        'CRITICAL: Domain conflict detected - multiple instances with same domain but different ports!'
+      );
+      throw new Error(
+        `Domain conflict: ${fullDomain} is already mapped to instance ${conflictingBackend.instanceName} on port ${conflictingBackend.port}. ` +
+        `Cannot map to instance ${config.instanceName} on port ${config.port}.`
+      );
+    }
     
     // Save backends
     this.saveBackends(backends);
@@ -660,9 +686,15 @@ defaults
         config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
         
         // Route TLS connections via SNI (if TLS is used)
-        for (const backend of postgresBackends) {
+        // IMPORTANT: Order matters - more specific domains should come first
+        // Sort by domain length (longer = more specific) to avoid prefix matching issues
+        const sortedBackends = [...postgresBackends].sort((a, b) => b.domain.length - a.domain.length);
+        
+        for (const backend of sortedBackends) {
           const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+          // Use exact match (-i for case-insensitive) to prevent subdomain conflicts
           config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
+          logger.debug({ domain: backend.domain, instanceName: backend.instanceName, port: backend.port }, 'Added SNI routing rule');
         }
         
         // For non-TLS connections, route to first backend as default

@@ -128,5 +128,46 @@ router.get('/backends', authMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/haproxy/backends/:domain
+ * Get backend configuration for a specific domain (for debugging)
+ */
+router.get('/backends/:domain', authMiddleware, async (req, res) => {
+  try {
+    const { domain } = req.params;
+    const backends = await haproxyService.getDatabaseBackends();
+    
+    // Find backend by domain (case-insensitive)
+    const backend = Object.values(backends).find(
+      (b) => b.domain.toLowerCase() === domain.toLowerCase()
+    );
+    
+    if (!backend) {
+      return res.status(404).json({
+        success: false,
+        error: `No backend found for domain: ${domain}`
+      });
+    }
+    
+    res.json({
+      success: true,
+      domain: domain,
+      backend: backend,
+      // Include all backends for comparison
+      allBackends: Object.values(backends).map(b => ({
+        instanceName: b.instanceName,
+        domain: b.domain,
+        port: b.port
+      }))
+    });
+  } catch (error) {
+    logger.error({ error: error instanceof Error ? error.message : 'Unknown error' }, 'Failed to get backend for domain');
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to get backend for domain'
+    });
+  }
+});
+
 export { router as haproxyRoutes };
 
