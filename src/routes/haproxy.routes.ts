@@ -169,5 +169,30 @@ router.get('/backends/:domain', authMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * POST /api/haproxy/verify-ports
+ * Verify and fix backend port mappings by checking actual Docker container ports
+ */
+router.post('/verify-ports', authMiddleware, async (req, res) => {
+  try {
+    logger.info('Verifying and fixing HAProxy backend port mappings...');
+    const result = await haproxyService.verifyAndFixBackendPorts();
+    
+    res.json({
+      success: true,
+      message: result.fixed > 0
+        ? `Fixed ${result.fixed} backend port mapping(s)`
+        : 'All backend port mappings are correct',
+      result: result
+    });
+  } catch (error) {
+    logger.error({ error: error instanceof Error ? error.message : 'Unknown error' }, 'Failed to verify backend ports');
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to verify backend ports'
+    });
+  }
+});
+
 export { router as haproxyRoutes };
 

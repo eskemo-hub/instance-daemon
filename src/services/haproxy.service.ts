@@ -146,7 +146,52 @@ export class HAProxyService {
       }
     }
     
-    // Add or update backend
+    // Validate BEFORE adding: Check for conflicts
+    // 1. Check if another backend has the same domain (should be unique)
+    const existingBackendWithDomain = Object.values(backends).find(
+      (backend) => backend.domain === fullDomain && backend.instanceName !== config.instanceName
+    );
+    
+    if (existingBackendWithDomain) {
+      logger.error(
+        {
+          newInstance: config.instanceName,
+          newDomain: fullDomain,
+          newPort: config.port,
+          existingInstance: existingBackendWithDomain.instanceName,
+          existingPort: existingBackendWithDomain.port
+        },
+        'CRITICAL: Domain already exists for different instance!'
+      );
+      throw new Error(
+        `Domain conflict: ${fullDomain} is already mapped to instance ${existingBackendWithDomain.instanceName} on port ${existingBackendWithDomain.port}. ` +
+        `Cannot map to instance ${config.instanceName} on port ${config.port}.`
+      );
+    }
+    
+    // 2. Check if another backend has the same port (ports should be unique per instance)
+    const existingBackendWithPort = Object.values(backends).find(
+      (backend) => backend.port === config.port && backend.instanceName !== config.instanceName
+    );
+    
+    if (existingBackendWithPort) {
+      logger.error(
+        {
+          newInstance: config.instanceName,
+          newDomain: fullDomain,
+          newPort: config.port,
+          existingInstance: existingBackendWithPort.instanceName,
+          existingDomain: existingBackendWithPort.domain
+        },
+        'CRITICAL: Port already in use by different instance!'
+      );
+      throw new Error(
+        `Port conflict: Port ${config.port} is already used by instance ${existingBackendWithPort.instanceName} (${existingBackendWithPort.domain}). ` +
+        `Cannot assign to instance ${config.instanceName} (${fullDomain}).`
+      );
+    }
+    
+    // Add or update backend (all validations passed)
     backends[config.instanceName] = {
       instanceName: config.instanceName,
       domain: fullDomain,
@@ -163,40 +208,43 @@ export class HAProxyService {
         subdomain: config.subdomain,
         baseDomain: config.domain
       },
-      'Adding/updating HAProxy backend'
+      'Adding/updating HAProxy backend - validated unique domain and port'
     );
-    
-    // Validate: Ensure no other backend has the same domain but different instance/port
-    const conflictingBackend = Object.values(backends).find(
-      (backend) => backend.domain === fullDomain && 
-                   backend.instanceName !== config.instanceName &&
-                   (backend.port !== config.port || backend.instanceName !== config.instanceName)
-    );
-    
-    if (conflictingBackend) {
-      logger.error(
-        {
-          newInstance: config.instanceName,
-          newDomain: fullDomain,
-          newPort: config.port,
-          conflictingInstance: conflictingBackend.instanceName,
-          conflictingPort: conflictingBackend.port
-        },
-        'CRITICAL: Domain conflict detected - multiple instances with same domain but different ports!'
-      );
-      throw new Error(
-        `Domain conflict: ${fullDomain} is already mapped to instance ${conflictingBackend.instanceName} on port ${conflictingBackend.port}. ` +
-        `Cannot map to instance ${config.instanceName} on port ${config.port}.`
-      );
-    }
     
     // Save backends
     this.saveBackends(backends);
     
+    // Log the mapping for verification
+    logger.info(
+      {
+        instanceName: config.instanceName,
+        domain: fullDomain,
+        port: config.port,
+        mapping: `${fullDomain} → 127.0.0.1:${config.port}`
+      },
+      'HAProxy backend mapping created'
+    );
+    
     // Regenerate HAProxy config
     await this.regenerateConfig();
+    
+    // Verify the config was generated correctly
+    const verifyBackend = this.loadBackends()[config.instanceName];
+    if (verifyBackend && (verifyBackend.domain !== fullDomain || verifyBackend.port !== config.port)) {
+      logger.error(
+        {
+          expected: { domain: fullDomain, port: config.port },
+          actual: { domain: verifyBackend.domain, port: verifyBackend.port }
+        },
+        'CRITICAL: Backend verification failed - stored values do not match!'
+      );
+      throw new Error(
+        `Backend verification failed: Expected domain ${fullDomain} port ${config.port}, ` +
+        `but got domain ${verifyBackend.domain} port ${verifyBackend.port}`
+      );
+    }
 
-    // Schedule an immediate certificate sync so Let’s Encrypt certs are pulled right away
+    // Schedule an immediate certificate sync so Let's Encrypt certs are pulled right away
     this.scheduleImmediateCertificateSync();
   }
 
@@ -215,6 +263,108 @@ export class HAProxyService {
     
     // Regenerate HAProxy config
     await this.regenerateConfig();
+  }
+
+  /**
+   * Verify and fix backend port mappings by checking actual Docker container ports
+   * This ensures each domain routes to the correct container port
+   */
+  async verifyAndFixBackendPorts(): Promise<{
+    fixed: number;
+    errors: number;
+    details: Array<{ instanceName: string; domain: string; oldPort: number; newPort: number }>;
+  }> {
+    if (!this.dockerService) {
+      throw new Error('DockerService not available for port verification');
+    }
+
+    const backends = this.loadBackends();
+    const fixes: Array<{ instanceName: string; domain: string; oldPort: number; newPort: number }> = [];
+    let errors = 0;
+    let needsRegenerate = false;
+
+    for (const [instanceName, backend] of Object.entries(backends)) {
+      try {
+        // Get container by name (container name format: template_name_instanceId)
+        // We need to find the container that matches this instance
+        const containers = await this.dockerService.listAllContainers(false);
+        const container = containers.find(c => 
+          c.name === instanceName || 
+          c.name.includes(instanceName) ||
+          c.name.endsWith(`_${instanceName}`)
+        );
+
+        if (!container) {
+          logger.warn({ instanceName, domain: backend.domain }, 'Container not found for backend, skipping verification');
+          continue;
+        }
+
+        // Get actual port from container by inspecting it
+        const docker = require('dockerode');
+        const dockerManager = require('../utils/docker-manager').dockerManager;
+        const dockerClient = dockerManager.getDocker();
+        const containerDetails = await dockerClient.getContainer(container.id).inspect();
+        
+        // Extract actual port from NetworkSettings
+        // Look for the container's internal port (5432 for PostgreSQL)
+        let actualPort = backend.port;
+        if (containerDetails.NetworkSettings?.Ports) {
+          // PostgreSQL containers expose 5432/tcp internally
+          const pgPort = containerDetails.NetworkSettings.Ports['5432/tcp'];
+          if (pgPort && pgPort.length > 0 && pgPort[0].HostPort) {
+            const hostPort = parseInt(pgPort[0].HostPort, 10);
+            if (!isNaN(hostPort) && hostPort > 0) {
+              actualPort = hostPort;
+            }
+          }
+        }
+
+        // If port differs, fix it
+        if (actualPort !== backend.port) {
+          logger.warn(
+            {
+              instanceName,
+              domain: backend.domain,
+              storedPort: backend.port,
+              actualPort
+            },
+            'Port mismatch detected, fixing backend'
+          );
+
+          const oldPort = backend.port;
+          backend.port = actualPort;
+          fixes.push({
+            instanceName,
+            domain: backend.domain,
+            oldPort: oldPort,
+            newPort: actualPort
+          });
+          needsRegenerate = true;
+        }
+      } catch (error) {
+        errors++;
+        logger.error(
+          {
+            instanceName,
+            domain: backend.domain,
+            error: error instanceof Error ? error.message : error
+          },
+          'Failed to verify backend port'
+        );
+      }
+    }
+
+    if (needsRegenerate) {
+      this.saveBackends(backends);
+      await this.regenerateConfig();
+      logger.info({ fixed: fixes.length }, 'Fixed backend port mappings and regenerated HAProxy config');
+    }
+
+    return {
+      fixed: fixes.length,
+      errors,
+      details: fixes
+    };
   }
 
   /**
@@ -771,11 +921,29 @@ defaults
     for (const backend of postgresBackends) {
       const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
       config += `# PostgreSQL: ${backend.instanceName} (${backend.domain})\n`;
+      config += `# Domain: ${backend.domain} → Container Port: ${backend.port}\n`;
       config += `backend ${backendName}\n`;
       config += `    mode tcp\n`;
       config += `    option tcp-check\n`;
       config += `    server ${backend.instanceName} 127.0.0.1:${backend.port} check\n`;
       config += `\n`;
+      
+      // Validate: Ensure port is unique per instance
+      const duplicatePort = postgresBackends.find(
+        (b) => b.port === backend.port && b.instanceName !== backend.instanceName
+      );
+      if (duplicatePort) {
+        logger.error(
+          {
+            instance1: backend.instanceName,
+            domain1: backend.domain,
+            port: backend.port,
+            instance2: duplicatePort.instanceName,
+            domain2: duplicatePort.domain
+          },
+          'CRITICAL: Multiple instances sharing the same port!'
+        );
+      }
     }
 
     // Note: No round-robin pool is configured when multiple databases share a frontend.
