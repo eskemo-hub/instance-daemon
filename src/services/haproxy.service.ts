@@ -41,39 +41,19 @@ export class HAProxyService {
   }
 
   /**
-   * Generate or get HAProxy-compatible certificate (combined PEM: cert + key)
-   * HAProxy requires certificates in a specific format: cert file followed by key file
+   * Generate or get certificate for PostgreSQL container
+   * Note: HAProxy TCP mode doesn't support TLS termination, so certificates
+   * are used by PostgreSQL containers directly, not by HAProxy
    */
   private async ensureHaproxyCertificate(instanceName: string, domain: string): Promise<string> {
-    const certPemPath = path.join(this.CERT_DIR, `${instanceName}.pem`);
-    
-    // If certificate already exists, return it
-    if (fs.existsSync(certPemPath)) {
-      return certPemPath;
-    }
-    
-    // Generate certificate using CertificateService
+    // Generate certificate using CertificateService (for PostgreSQL container use)
+    // HAProxy will pass through TLS, so PostgreSQL needs the certificate
     const certPaths = await this.certificateService.generateCertificate(instanceName, domain);
     
-    // Combine cert and key into single PEM file for HAProxy
-    // HAProxy format: certificate first, then private key
-    const certContent = fs.readFileSync(certPaths.certPath, 'utf-8');
-    const keyContent = fs.readFileSync(certPaths.keyPath, 'utf-8');
-    const combinedPem = `${certContent}\n${keyContent}\n`;
+    logger.info({ instanceName, domain, certPath: certPaths.certPath }, 'Generated certificate for PostgreSQL container');
     
-    // Write combined PEM file
-    fs.writeFileSync(certPemPath, combinedPem, { mode: 0o644 });
-    
-    // Set ownership to haproxy user if possible
-    try {
-      execSync(`chown haproxy:haproxy "${certPemPath}"`, { stdio: 'pipe' });
-    } catch (error) {
-      // If we can't chown, that's okay - HAProxy will still work
-    }
-    
-    logger.info({ instanceName, domain, certPath: certPemPath }, 'Generated HAProxy TLS certificate');
-    
-    return certPemPath;
+    // Return cert path (though HAProxy won't use it directly in TCP mode)
+    return certPaths.certPath;
   }
 
   /**
@@ -201,13 +181,14 @@ export class HAProxyService {
       }
     }
     
-    // Ensure certificates exist for all backends
+    // Ensure certificates exist for all backends (for PostgreSQL container use)
+    // Note: HAProxy TCP mode passes through TLS, so containers handle TLS termination
     for (const backend of [...postgresBackends, ...mysqlBackends]) {
       try {
         await this.ensureHaproxyCertificate(backend.instanceName, backend.domain);
       } catch (error) {
-        logger.warn({ error, instanceName: backend.instanceName, domain: backend.domain }, 'Failed to ensure certificate, continuing without TLS');
-        // Continue without TLS - will use passthrough mode
+        logger.warn({ error, instanceName: backend.instanceName, domain: backend.domain }, 'Failed to ensure certificate');
+        // Continue - HAProxy will still route, but TLS might not work
       }
     }
     
@@ -305,61 +286,27 @@ defaults
         const certExists = fs.existsSync(certPath);
         
         config += `# PostgreSQL Database (port 5432)\n`;
-        config += `# External: ${backend.domain}:5432 → HAProxy ${certExists ? '(TLS termination)' : ''} → Internal: 127.0.0.1:${backend.port}\n`;
+        config += `# External: ${backend.domain}:5432 → HAProxy (SNI passthrough) → Internal: 127.0.0.1:${backend.port}\n`;
+        config += `# Note: HAProxy TCP mode passes through TLS - PostgreSQL container handles TLS termination\n`;
         config += `frontend postgres_frontend\n`;
-        if (certExists) {
-          // TLS termination: HAProxy handles TLS, connects to backend in plain TCP
-          // Note: When ssl crt is used, HAProxy ONLY accepts TLS connections
-          // Non-TLS connections will be rejected - clients must use sslmode=require
-          config += `    bind *:5432 ssl crt ${certPath}\n`;
-        } else {
-          // No certificate: accept both TLS and non-TLS (passthrough)
-          config += `    bind *:5432\n`;
-        }
+        config += `    bind *:5432\n`;
         config += `    mode tcp\n`;
-        if (!certExists) {
-          // Only inspect for SNI if not terminating TLS
-          config += `    tcp-request inspect-delay 5s\n`;
-          config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
-          config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
-        }
+        config += `    tcp-request inspect-delay 5s\n`;
+        config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
+        config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
         config += `    default_backend ${backendName}\n`;
         config += `\n`;
       } else {
         // Multiple databases: Create shared frontend for TLS (SNI routing on port 5432)
         // AND individual frontends for each database on unique ports for non-TLS
         config += `# PostgreSQL Databases - TLS/SNI Routing (port 5432)\n`;
-        config += `# TLS connections: HAProxy terminates TLS and routes via SNI to correct backend\n`;
+        config += `# TLS connections: HAProxy passes through TLS and routes via SNI to correct backend\n`;
+        config += `# Note: HAProxy TCP mode passes through TLS - PostgreSQL containers handle TLS termination\n`;
         config += `frontend postgres_frontend_tls\n`;
-        
-        // Collect all certificate paths for multi-cert bind
-        const certPaths: string[] = [];
-        for (const backend of postgresBackends) {
-          const certPath = path.join(this.CERT_DIR, `${backend.instanceName}.pem`);
-          if (fs.existsSync(certPath)) {
-            certPaths.push(certPath);
-          }
-        }
-        
-        if (certPaths.length === 1) {
-          // Single certificate: simple bind
-          config += `    bind *:5432 ssl crt ${certPaths[0]}\n`;
-        } else if (certPaths.length > 1) {
-          // Multiple certificates: use directory approach
-          // HAProxy will load all .pem files from the directory and use SNI to select
-          // Note: Directory must end without trailing slash for HAProxy
-          config += `    bind *:5432 ssl crt ${this.CERT_DIR}\n`;
-        } else {
-          // No certificates: passthrough mode (read SNI but don't terminate)
-          config += `    bind *:5432\n`;
-        }
-        
+        config += `    bind *:5432\n`;
         config += `    mode tcp\n`;
-        if (certPaths.length === 0) {
-          // Only inspect for SNI if not terminating TLS
-          config += `    tcp-request inspect-delay 5s\n`;
-          config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
-        }
+        config += `    tcp-request inspect-delay 5s\n`;
+        config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
         
         // Route TLS connections via SNI
         for (const backend of postgresBackends) {
