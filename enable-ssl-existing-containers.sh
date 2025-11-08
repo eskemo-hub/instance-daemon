@@ -68,27 +68,39 @@ if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
         # Use sudo for /opt/n8n-daemon/, regular check for others
         if [[ "$CERT_DIR" == /opt/n8n-daemon/* ]] || [[ "$CERT_DIR" == /var/lib/n8n-daemon/* ]]; then
             if sudo test -d "$CERT_DIR"; then
+                echo "  ✅ Directory exists"
                 HOST_CERT_DIR="$CERT_DIR"
-                # Find certificate files on host (with sudo)
-                HOST_CERT=$(sudo find "$CERT_DIR" -name "*.crt" -o -name "fullchain.pem" 2>/dev/null | head -1)
-                HOST_KEY=$(sudo find "$CERT_DIR" -name "*.key" -o -name "privkey.pem" 2>/dev/null | head -1)
+                # Find certificate files on host (with sudo) - need to group -o conditions
+                HOST_CERT=$(sudo find "$CERT_DIR" \( -name "*.crt" -o -name "fullchain.pem" \) 2>/dev/null | head -1)
+                HOST_KEY=$(sudo find "$CERT_DIR" \( -name "*.key" -o -name "privkey.pem" \) 2>/dev/null | head -1)
+                
+                echo "    Cert found: ${HOST_CERT:-none}"
+                echo "    Key found: ${HOST_KEY:-none}"
                 
                 if [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
                     echo "  ✅ Found certificates!"
                     break
                 fi
+            else
+                echo "  ❌ Directory does not exist"
             fi
         else
             if [ -d "$CERT_DIR" ]; then
+                echo "  ✅ Directory exists"
                 HOST_CERT_DIR="$CERT_DIR"
-                # Find certificate files on host
-                HOST_CERT=$(find "$CERT_DIR" -name "*.crt" -o -name "fullchain.pem" 2>/dev/null | head -1)
-                HOST_KEY=$(find "$CERT_DIR" -name "*.key" -o -name "privkey.pem" 2>/dev/null | head -1)
+                # Find certificate files on host - need to group -o conditions
+                HOST_CERT=$(find "$CERT_DIR" \( -name "*.crt" -o -name "fullchain.pem" \) 2>/dev/null | head -1)
+                HOST_KEY=$(find "$CERT_DIR" \( -name "*.key" -o -name "privkey.pem" \) 2>/dev/null | head -1)
+                
+                echo "    Cert found: ${HOST_CERT:-none}"
+                echo "    Key found: ${HOST_KEY:-none}"
                 
                 if [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
                     echo "  ✅ Found certificates!"
                     break
                 fi
+            else
+                echo "  ❌ Directory does not exist"
             fi
         fi
     done
