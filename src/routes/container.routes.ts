@@ -138,6 +138,7 @@ containerRoutes.delete('/:id', async (req: Request, res: Response, next: NextFun
     }
 
     // Remove container with volumes (Requirement 14.4)
+    // This will handle "container not found" gracefully and return early
     await dockerService.removeContainer(id, true);
     
     // Invalidate cache for this container
@@ -148,6 +149,16 @@ containerRoutes.delete('/:id', async (req: Request, res: Response, next: NextFun
       message: 'Container and volumes removed successfully'
     });
   } catch (error) {
+    // If container not found, treat as success (already removed)
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes('not found') || errorMessage.includes('No such') || errorMessage.includes('no such container')) {
+      // Invalidate cache anyway
+      invalidateCache(containerStatusCache, req.params.id);
+      return res.status(200).json({
+        success: true,
+        message: 'Container not found (may have been already removed)'
+      });
+    }
     next(error);
   }
 });
