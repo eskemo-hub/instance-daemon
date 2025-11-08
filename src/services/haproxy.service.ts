@@ -9,8 +9,9 @@ interface DatabaseBackend {
   instanceName: string;
   domain: string;
   port: number; // Container's internal port (e.g., 5702)
-  haproxyPort?: number; // HAProxy frontend port for non-TLS (e.g., 5433, 5434) - only set when multiple databases exist
+  haproxyPort?: number; // Deprecated - no longer used (we use ONLY port 5432)
   dbType: 'postgres' | 'mysql' | 'mongodb';
+  routingKey?: string; // Unique identifier for routing (e.g., database name pattern, user pattern)
 }
 
 type CertificateSyncTrigger = 'scheduled' | 'immediate' | 'manual';
@@ -1082,42 +1083,71 @@ defaults
         config += `    default_backend ${backendName}\n`;
         config += `\n`;
       } else {
-        // Multiple databases: ALL connections use port 5432 ONLY (non-TLS)
-        // Route based on PostgreSQL startup packet inspection
-        // PostgreSQL startup packet contains database name - we can use this to route
-        // However, for simplicity and reliability, we'll use a round-robin approach
-        // where each connection goes to the next backend, OR we can route by source IP
-        // Actually, the cleanest approach for non-TLS is to use the connection source
-        // But the most reliable is to use PostgreSQL startup packet database name
-        // For now, let's use a simple approach: route to first backend for non-TLS
-        // Users should connect using the domain name, and DNS will resolve to the same IP
-        // But HAProxy can't see the domain in non-TLS TCP connections
-        // 
-        // BEST SOLUTION: Use PostgreSQL startup packet inspection to route by database name
-        // Each database instance can have a unique database name pattern
-        // OR: Use source IP routing if each domain resolves to a different IP (not typical)
-        //
-        // SIMPLEST: For non-TLS, we'll route all connections to first backend
-        // This works if users only have one database, or if they use direct container ports
-        // For multiple databases with non-TLS, users need to use direct container ports
-        config += `# PostgreSQL Databases - Port 5432 ONLY (Non-TLS)\n`;
-        config += `# ALL connections use port 5432 - clean setup\n`;
-        config += `# Note: Non-TLS routing by domain is not possible in TCP mode\n`;
-        config += `# All non-TLS connections route to first backend\n`;
-        config += `# For multiple databases, use direct container ports or enable TLS\n`;
+        // Multiple databases: ALL connections use port 5432 ONLY
+        // Route based on domain using SNI (TLS) - this is the ONLY way to route by domain
+        // IMPORTANT: TLS is required for domain-based routing in TCP mode
+        // HAProxy cannot route non-TLS connections by domain (domain not in TCP packet)
+        // TLS/SNI is the standard, professional solution used by all major providers
+        config += `# PostgreSQL Databases - Port 5432 ONLY\n`;
+        config += `# ALL connections use port 5432 - clean and professional setup\n`;
+        config += `# Routing: Domain-based via SNI (TLS required for domain routing)\n`;
+        config += `# TLS is required for domain-based routing - this is standard practice\n`;
         config += `frontend postgres_frontend\n`;
         config += `    bind *:5432\n`;
         config += `    mode tcp\n`;
         config += `    option tcplog\n`;
+        config += `    tcp-request inspect-delay 5s\n`;
+        config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
         
-        // For non-TLS, we can't route by domain, so route to first backend
-        // This is a limitation of TCP mode without TLS/SNI
+        // Route TLS connections via SNI (domain in TLS handshake)
+        // IMPORTANT: Order matters - more specific domains should come first
+        // Sort by domain length (longer = more specific) to avoid prefix matching issues
+        const sortedBackends = [...postgresBackends].sort((a, b) => b.domain.length - a.domain.length);
+        
+        // Validate: Check for domain conflicts
+        for (let i = 0; i < sortedBackends.length; i++) {
+          for (let j = i + 1; j < sortedBackends.length; j++) {
+            const domain1 = sortedBackends[i].domain.toLowerCase();
+            const domain2 = sortedBackends[j].domain.toLowerCase();
+            if (domain1.includes(domain2) || domain2.includes(domain1)) {
+              logger.warn(
+                {
+                  domain1: sortedBackends[i].domain,
+                  domain2: sortedBackends[j].domain,
+                  instance1: sortedBackends[i].instanceName,
+                  instance2: sortedBackends[j].instanceName
+                },
+                'Potential domain conflict detected - SNI matching may be ambiguous'
+              );
+            }
+          }
+        }
+        
+        // Add SNI routing rules for TLS connections
+        for (const backend of sortedBackends) {
+          const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+          // Use exact match with regex to ensure precise domain matching
+          const escapedDomain = backend.domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          // Use req_ssl_sni with exact match (no wildcards) to prevent subdomain conflicts
+          config += `    use_backend ${backendName} if { req_ssl_sni -m reg -i ^${escapedDomain}$ }\n`;
+          logger.debug(
+            { 
+              domain: backend.domain, 
+              instanceName: backend.instanceName, 
+              port: backend.port,
+              backendName 
+            }, 
+            'Added SNI routing rule with exact domain match'
+          );
+        }
+        
+        // For non-TLS connections, route to first backend as fallback
+        // Note: Non-TLS connections cannot be routed by domain
         const firstBackend = postgresBackends[0];
         const firstBackendName = `postgres_${firstBackend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
+        config += `    # Non-TLS connections route to first backend (${firstBackend.domain})\n`;
+        config += `    # IMPORTANT: For domain-based routing, use TLS with domain in SNI\n`;
         config += `    default_backend ${firstBackendName}\n`;
-        config += `    # All connections route to first backend: ${firstBackend.domain} (port ${firstBackend.port})\n`;
-        config += `    # For multiple databases with non-TLS, each database needs its own port\n`;
-        config += `    # OR enable TLS to use SNI routing on port 5432\n`;
         config += `\n`;
         
         // Remove haproxyPort from backends - we don't use multiple ports anymore
