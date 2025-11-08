@@ -256,24 +256,64 @@ export class DockerService {
         const containerInfo = await container.inspect();
 
         // Extract the actual bound port from the container's network settings
-        // Docker might assign a different port if the requested port is in use
-        let actualPort = config.port;
+        // IMPORTANT: Always use the actual bound port from Docker, not the requested port
+        // Ports may not be sequential (e.g., if containers were deleted and ports reused)
+        // Docker is the source of truth for what port the container is actually bound to
+        let actualPort = config.port; // Fallback to requested port if extraction fails
         if (containerInfo.NetworkSettings?.Ports) {
           const portBindings = containerInfo.NetworkSettings.Ports[`${internalPort}/tcp`];
           if (portBindings && portBindings.length > 0 && portBindings[0].HostPort) {
             const boundPort = parseInt(portBindings[0].HostPort, 10);
-            if (!isNaN(boundPort) && boundPort !== config.port) {
+            if (!isNaN(boundPort) && boundPort > 0) {
+              // Always use the actual bound port from Docker (even if it matches requested port)
+              actualPort = boundPort;
+              
+              if (boundPort !== config.port) {
+                logger.warn(
+                  {
+                    requestedPort: config.port,
+                    actualPort: boundPort,
+                    containerName: config.name
+                  },
+                  'Container bound to different port than requested - using actual bound port'
+                );
+              } else {
+                logger.debug(
+                  {
+                    port: boundPort,
+                    containerName: config.name
+                  },
+                  'Container bound to requested port - verified from Docker NetworkSettings'
+                );
+              }
+            } else {
               logger.warn(
                 {
                   requestedPort: config.port,
-                  actualPort: boundPort,
-                  containerName: config.name
+                  containerName: config.name,
+                  boundPort
                 },
-                'Container bound to different port than requested'
+                'Invalid bound port from Docker - falling back to requested port'
               );
-              actualPort = boundPort;
             }
+          } else {
+            logger.warn(
+              {
+                requestedPort: config.port,
+                containerName: config.name,
+                internalPort
+              },
+              'No port binding found in Docker NetworkSettings - using requested port as fallback'
+            );
           }
+        } else {
+          logger.warn(
+            {
+              requestedPort: config.port,
+              containerName: config.name
+            },
+            'No NetworkSettings.Ports found - using requested port as fallback'
+          );
         }
 
         // Extract the actual volume name from the container mounts

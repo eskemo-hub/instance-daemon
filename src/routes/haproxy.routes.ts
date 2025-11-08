@@ -194,5 +194,37 @@ router.post('/verify-ports', authMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/haproxy/validate-mappings
+ * Validate all domain-to-port mappings by checking actual container ports
+ * Returns a report showing which domains route to which container ports
+ * IMPORTANT: External port is always 5432 (for PostgreSQL) - users connect to domain:5432
+ * HAProxy routes based on domain (SNI) to internal container port
+ */
+router.get('/validate-mappings', authMiddleware, async (req, res) => {
+  try {
+    logger.info('Validating domain-to-port mappings...');
+    const result = await haproxyService.validateDomainPortMappings();
+    
+    res.json({
+      success: true,
+      message: `Validated ${result.details.length} domain-to-port mappings: ${result.valid} valid, ${result.invalid} invalid, ${result.missing} missing`,
+      summary: {
+        total: result.details.length,
+        valid: result.valid,
+        invalid: result.invalid,
+        missing: result.missing
+      },
+      mappings: result.details
+    });
+  } catch (error) {
+    logger.error({ error: error instanceof Error ? error.message : 'Unknown error' }, 'Failed to validate domain-to-port mappings');
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to validate domain-to-port mappings'
+    });
+  }
+});
+
 export { router as haproxyRoutes };
 

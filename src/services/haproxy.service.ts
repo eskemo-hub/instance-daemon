@@ -87,15 +87,104 @@ export class HAProxyService {
 
   /**
    * Add database backend to HAProxy
+   * 
+   * IMPORTANT: External port is always 5432 (for PostgreSQL) - users always connect to domain:5432
+   * HAProxy routes based on domain (SNI) to the correct internal container port
+   * Flow: domain:5432 → HAProxy (SNI) → 127.0.0.1:container_port
    */
   async addDatabaseBackend(config: {
     instanceName: string;
     domain: string;
     subdomain: string;
-    port: number;
+    port: number; // Container's internal port (e.g., 35001) - NOT the external port (5432)
     dbType: 'postgres' | 'mysql' | 'mongodb';
   }): Promise<void> {
     const fullDomain = `${config.subdomain}.${config.domain}`;
+    
+    // Validate: Verify the port matches the actual container port if DockerService is available
+    if (this.dockerService) {
+      try {
+        const containers = await this.dockerService.listAllContainers(false);
+        const container = containers.find(c => 
+          c.name === config.instanceName || 
+          c.name.includes(config.instanceName) ||
+          c.name.endsWith(`_${config.instanceName}`)
+        );
+
+        if (container) {
+          // Get actual port from container
+          const docker = require('dockerode');
+          const dockerManager = require('../utils/docker-manager').dockerManager;
+          const dockerClient = dockerManager.getDocker();
+          const containerDetails = await dockerClient.getContainer(container.id).inspect();
+          
+          // Determine expected internal port based on database type
+          let expectedInternalPort: string;
+          if (config.dbType === 'postgres') {
+            expectedInternalPort = '5432/tcp';
+          } else if (config.dbType === 'mysql') {
+            expectedInternalPort = '3306/tcp';
+          } else if (config.dbType === 'mongodb') {
+            expectedInternalPort = '27017/tcp';
+          } else {
+            expectedInternalPort = '';
+          }
+
+          // Extract actual host port from container
+          // IMPORTANT: Always use the actual bound port from Docker, not the provided port
+          // Ports may not be sequential (e.g., if containers were deleted and ports reused)
+          // Docker NetworkSettings is the source of truth for what port the container is actually bound to
+          let actualHostPort = config.port; // Fallback to provided port if extraction fails
+          if (containerDetails.NetworkSettings?.Ports && expectedInternalPort) {
+            const portBinding = containerDetails.NetworkSettings.Ports[expectedInternalPort];
+            if (portBinding && portBinding.length > 0 && portBinding[0].HostPort) {
+              const boundPort = parseInt(portBinding[0].HostPort, 10);
+              if (!isNaN(boundPort) && boundPort > 0) {
+                actualHostPort = boundPort;
+              }
+            }
+          }
+
+          // Always use the actual port from container (even if it matches provided port)
+          // This ensures we're using Docker's source of truth, not assuming sequential ports
+          if (actualHostPort !== config.port) {
+            logger.warn(
+              {
+                instanceName: config.instanceName,
+                domain: fullDomain,
+                providedPort: config.port,
+                actualContainerPort: actualHostPort,
+                dbType: config.dbType
+              },
+              'Port mismatch detected - using actual container port from Docker NetworkSettings'
+            );
+            config.port = actualHostPort;
+          } else {
+            logger.info(
+              {
+                instanceName: config.instanceName,
+                domain: fullDomain,
+                port: actualHostPort,
+                dbType: config.dbType,
+                routing: `${fullDomain}:5432 → 127.0.0.1:${actualHostPort}`,
+                source: 'Docker NetworkSettings (verified)'
+              },
+              'Using actual bound port from container (matches provided port)'
+            );
+          }
+        } else {
+          logger.warn(
+            { instanceName: config.instanceName, domain: fullDomain },
+            'Container not found for port verification - using provided port'
+          );
+        }
+      } catch (error) {
+        logger.warn(
+          { error: error instanceof Error ? error.message : error, instanceName: config.instanceName },
+          'Failed to verify container port - using provided port (container may not be running yet)'
+        );
+      }
+    }
     
     // Generate TLS certificate for this domain
     try {
@@ -215,14 +304,18 @@ export class HAProxyService {
     this.saveBackends(backends);
     
     // Log the mapping for verification
+    // IMPORTANT: External port is always 5432 (for PostgreSQL) - users connect to domain:5432
+    // HAProxy routes based on domain (SNI) to internal container port
     logger.info(
       {
         instanceName: config.instanceName,
         domain: fullDomain,
-        port: config.port,
-        mapping: `${fullDomain} → 127.0.0.1:${config.port}`
+        externalPort: 5432, // Users always connect to port 5432
+        internalPort: config.port, // Container's internal port (e.g., 35001)
+        routing: `${fullDomain}:5432 → HAProxy (SNI) → 127.0.0.1:${config.port}`,
+        dbType: config.dbType
       },
-      'HAProxy backend mapping created'
+      'HAProxy backend mapping created - domain routes to container port'
     );
     
     // Regenerate HAProxy config
@@ -242,6 +335,34 @@ export class HAProxyService {
         `Backend verification failed: Expected domain ${fullDomain} port ${config.port}, ` +
         `but got domain ${verifyBackend.domain} port ${verifyBackend.port}`
       );
+    }
+
+    // Verify port matches actual container port (if DockerService is available)
+    if (this.dockerService) {
+      try {
+        const verificationResult = await this.verifyAndFixBackendPorts();
+        if (verificationResult.fixed > 0) {
+          logger.warn(
+            {
+              fixed: verificationResult.fixed,
+              details: verificationResult.details
+            },
+            'Fixed port mismatches after adding backend - ports were corrected'
+          );
+        }
+        if (verificationResult.errors > 0) {
+          logger.warn(
+            { errors: verificationResult.errors },
+            'Some port verifications failed (containers may not be running yet)'
+          );
+        }
+      } catch (error) {
+        // Don't fail backend addition if verification fails - just log it
+        logger.warn(
+          { error: error instanceof Error ? error.message : error, instanceName: config.instanceName },
+          'Port verification failed after adding backend (non-critical)'
+        );
+      }
     }
 
     // Schedule an immediate certificate sync so Let's Encrypt certs are pulled right away
@@ -306,20 +427,54 @@ export class HAProxyService {
         const containerDetails = await dockerClient.getContainer(container.id).inspect();
         
         // Extract actual port from NetworkSettings
-        // Look for the container's internal port (5432 for PostgreSQL)
-        let actualPort = backend.port;
+        // IMPORTANT: Always use the actual bound port from Docker, not the stored port
+        // Ports may not be sequential (e.g., if containers were deleted and ports reused)
+        // Docker NetworkSettings is the source of truth for what port the container is actually bound to
+        // Determine internal port based on database type
+        let internalPort: string;
+        if (backend.dbType === 'postgres') {
+          internalPort = '5432/tcp';
+        } else if (backend.dbType === 'mysql') {
+          internalPort = '3306/tcp';
+        } else if (backend.dbType === 'mongodb') {
+          internalPort = '27017/tcp';
+        } else {
+          // Fallback: try to find any port binding
+          internalPort = '';
+        }
+        
+        let actualPort = backend.port; // Fallback to stored port if extraction fails
         if (containerDetails.NetworkSettings?.Ports) {
-          // PostgreSQL containers expose 5432/tcp internally
-          const pgPort = containerDetails.NetworkSettings.Ports['5432/tcp'];
-          if (pgPort && pgPort.length > 0 && pgPort[0].HostPort) {
-            const hostPort = parseInt(pgPort[0].HostPort, 10);
-            if (!isNaN(hostPort) && hostPort > 0) {
-              actualPort = hostPort;
+          // First, try to find port by database type
+          if (internalPort && containerDetails.NetworkSettings.Ports[internalPort]) {
+            const portBinding = containerDetails.NetworkSettings.Ports[internalPort];
+            if (portBinding && portBinding.length > 0 && portBinding[0].HostPort) {
+              const hostPort = parseInt(portBinding[0].HostPort, 10);
+              if (!isNaN(hostPort) && hostPort > 0) {
+                actualPort = hostPort; // Always use actual bound port from Docker
+              }
+            }
+          } else {
+            // Fallback: find any TCP port binding (should only be one for databases)
+            const allPorts = Object.entries(containerDetails.NetworkSettings.Ports || {});
+            for (const [portKey, portBindings] of allPorts) {
+              if (portKey.endsWith('/tcp') && Array.isArray(portBindings) && portBindings.length > 0) {
+                const hostPort = parseInt(portBindings[0].HostPort, 10);
+                if (!isNaN(hostPort) && hostPort > 0) {
+                  actualPort = hostPort; // Always use actual bound port from Docker
+                  logger.debug(
+                    { instanceName, foundPort: portKey, hostPort },
+                    'Found port binding via fallback method - using actual bound port'
+                  );
+                  break;
+                }
+              }
             }
           }
         }
 
-        // If port differs, fix it
+        // Always update to use actual port from Docker (even if it matches stored port)
+        // This ensures we're using Docker's source of truth, not assuming ports are sequential
         if (actualPort !== backend.port) {
           logger.warn(
             {
@@ -389,6 +544,132 @@ export class HAProxyService {
    */
   async getDatabaseBackends(): Promise<Record<string, DatabaseBackend>> {
     return this.loadBackends();
+  }
+
+  /**
+   * Validate all domain-to-port mappings by checking actual container ports
+   * Returns a report of all mappings and any issues found
+   */
+  async validateDomainPortMappings(): Promise<{
+    valid: number;
+    invalid: number;
+    missing: number;
+    details: Array<{
+      instanceName: string;
+      domain: string;
+      expectedPort: number;
+      actualPort: number | null;
+      status: 'valid' | 'invalid' | 'missing';
+      routing: string;
+    }>;
+  }> {
+    const backends = this.loadBackends();
+    const results: Array<{
+      instanceName: string;
+      domain: string;
+      expectedPort: number;
+      actualPort: number | null;
+      status: 'valid' | 'invalid' | 'missing';
+      routing: string;
+    }> = [];
+
+    if (!this.dockerService) {
+      logger.warn('DockerService not available for domain-to-port validation');
+      return {
+        valid: 0,
+        invalid: 0,
+        missing: 0,
+        details: []
+      };
+    }
+
+    for (const [instanceName, backend] of Object.entries(backends)) {
+      try {
+        const containers = await this.dockerService.listAllContainers(false);
+        const container = containers.find(c => 
+          c.name === instanceName || 
+          c.name.includes(instanceName) ||
+          c.name.endsWith(`_${instanceName}`)
+        );
+
+        if (!container) {
+          results.push({
+            instanceName,
+            domain: backend.domain,
+            expectedPort: backend.port,
+            actualPort: null,
+            status: 'missing',
+            routing: `${backend.domain}:5432 → 127.0.0.1:${backend.port} (container not found)`
+          });
+          continue;
+        }
+
+        // Get actual port from container
+        const docker = require('dockerode');
+        const dockerManager = require('../utils/docker-manager').dockerManager;
+        const dockerClient = dockerManager.getDocker();
+        const containerDetails = await dockerClient.getContainer(container.id).inspect();
+        
+        // Determine expected internal port based on database type
+        let expectedInternalPort: string;
+        if (backend.dbType === 'postgres') {
+          expectedInternalPort = '5432/tcp';
+        } else if (backend.dbType === 'mysql') {
+          expectedInternalPort = '3306/tcp';
+        } else if (backend.dbType === 'mongodb') {
+          expectedInternalPort = '27017/tcp';
+        } else {
+          expectedInternalPort = '';
+        }
+
+        // Extract actual host port from container
+        let actualHostPort: number | null = null;
+        if (containerDetails.NetworkSettings?.Ports && expectedInternalPort) {
+          const portBinding = containerDetails.NetworkSettings.Ports[expectedInternalPort];
+          if (portBinding && portBinding.length > 0 && portBinding[0].HostPort) {
+            actualHostPort = parseInt(portBinding[0].HostPort, 10);
+          }
+        }
+
+        const externalPort = backend.dbType === 'postgres' ? 5432 : backend.dbType === 'mysql' ? 3306 : 27017;
+        const status: 'valid' | 'invalid' | 'missing' = 
+          actualHostPort === null ? 'missing' :
+          actualHostPort === backend.port ? 'valid' : 'invalid';
+
+        results.push({
+          instanceName,
+          domain: backend.domain,
+          expectedPort: backend.port,
+          actualPort: actualHostPort,
+          status,
+          routing: `${backend.domain}:${externalPort} → HAProxy (SNI) → 127.0.0.1:${actualHostPort || backend.port}`
+        });
+      } catch (error) {
+        logger.error(
+          { instanceName, domain: backend.domain, error: error instanceof Error ? error.message : error },
+          'Failed to validate domain-to-port mapping'
+        );
+        results.push({
+          instanceName,
+          domain: backend.domain,
+          expectedPort: backend.port,
+          actualPort: null,
+          status: 'missing',
+          routing: `${backend.domain}:5432 → 127.0.0.1:${backend.port} (validation failed)`
+        });
+      }
+    }
+
+    const valid = results.filter(r => r.status === 'valid').length;
+    const invalid = results.filter(r => r.status === 'invalid').length;
+    const missing = results.filter(r => r.status === 'missing').length;
+
+    return {
+      valid,
+      invalid,
+      missing,
+      details: results
+    };
   }
 
   /**
@@ -797,11 +1078,14 @@ defaults
 
 
     // Create frontends for PostgreSQL databases
+    // IMPORTANT: External port is ALWAYS 5432 - users connect to domain:5432
+    // HAProxy routes based on domain (SNI) to the correct internal container port
+    // Flow: domain:5432 → HAProxy (SNI inspection) → 127.0.0.1:container_port
     // Strategy:
     // - Single database: Use port 5432 for both TLS and non-TLS
     // - Multiple databases: Each gets its own frontend on port 5432 (TLS via SNI) + unique port (non-TLS)
     //   This ensures both TLS and non-TLS connections route to the correct container
-    // TLS Termination: HAProxy terminates TLS and connects to backend in plain TCP
+    // TLS Termination: HAProxy passes through TLS (TCP mode) - PostgreSQL container handles TLS termination
     if (postgresBackends.length > 0) {
       if (postgresBackends.length === 1) {
         // Single database: Use standard port 5432 for both TLS and non-TLS
@@ -818,7 +1102,9 @@ defaults
         config += `    mode tcp\n`;
         config += `    tcp-request inspect-delay 5s\n`;
         config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
-        config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
+        // Use exact match with regex to ensure precise domain matching
+        const escapedDomain = backend.domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        config += `    use_backend ${backendName} if { req_ssl_sni -m reg -i ^${escapedDomain}$ }\n`;
         config += `    default_backend ${backendName}\n`;
         config += `\n`;
       } else {
@@ -840,11 +1126,41 @@ defaults
         // Sort by domain length (longer = more specific) to avoid prefix matching issues
         const sortedBackends = [...postgresBackends].sort((a, b) => b.domain.length - a.domain.length);
         
+        // Validate: Check for domain conflicts (one domain being a substring of another)
+        for (let i = 0; i < sortedBackends.length; i++) {
+          for (let j = i + 1; j < sortedBackends.length; j++) {
+            const domain1 = sortedBackends[i].domain.toLowerCase();
+            const domain2 = sortedBackends[j].domain.toLowerCase();
+            if (domain1.includes(domain2) || domain2.includes(domain1)) {
+              logger.warn(
+                {
+                  domain1: sortedBackends[i].domain,
+                  domain2: sortedBackends[j].domain,
+                  instance1: sortedBackends[i].instanceName,
+                  instance2: sortedBackends[j].instanceName
+                },
+                'Potential domain conflict detected - SNI matching may be ambiguous'
+              );
+            }
+          }
+        }
+        
         for (const backend of sortedBackends) {
           const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
-          // Use exact match (-i for case-insensitive) to prevent subdomain conflicts
-          config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
-          logger.debug({ domain: backend.domain, instanceName: backend.instanceName, port: backend.port }, 'Added SNI routing rule');
+          // Use exact match with regex to ensure precise domain matching
+          // Escape special characters in domain for regex
+          const escapedDomain = backend.domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          // Use req_ssl_sni with exact match (no wildcards) to prevent subdomain conflicts
+          config += `    use_backend ${backendName} if { req_ssl_sni -m reg -i ^${escapedDomain}$ }\n`;
+          logger.debug(
+            { 
+              domain: backend.domain, 
+              instanceName: backend.instanceName, 
+              port: backend.port,
+              backendName 
+            }, 
+            'Added SNI routing rule with exact domain match'
+          );
         }
         
         // For non-TLS connections, route to first backend as default
@@ -896,9 +1212,23 @@ defaults
       config += `    tcp-request content accept if { req_ssl_hello_type 1 }\n`;
 
       // Route based on SNI to the correct backend (for TLS clients)
-      for (const backend of mysqlBackends) {
+      // Sort by domain length (longer = more specific) to avoid prefix matching issues
+      const sortedMysqlBackends = [...mysqlBackends].sort((a, b) => b.domain.length - a.domain.length);
+      
+      for (const backend of sortedMysqlBackends) {
         const backendName = `mysql_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
-        config += `    use_backend ${backendName} if { req.ssl_sni -i ${backend.domain} }\n`;
+        // Use exact match with regex to ensure precise domain matching
+        const escapedDomain = backend.domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        config += `    use_backend ${backendName} if { req_ssl_sni -m reg -i ^${escapedDomain}$ }\n`;
+        logger.debug(
+          { 
+            domain: backend.domain, 
+            instanceName: backend.instanceName, 
+            port: backend.port,
+            backendName 
+          }, 
+          'Added MySQL SNI routing rule with exact domain match'
+        );
       }
 
       // For non-TLS connections or when SNI doesn't match:
@@ -918,15 +1248,32 @@ defaults
     }
 
     // PostgreSQL backends
+    // IMPORTANT: External port is 5432, internal port is backend.port
+    // Users connect to: ${backend.domain}:5432
+    // HAProxy routes to: 127.0.0.1:${backend.port} (container's internal port)
     for (const backend of postgresBackends) {
       const backendName = `postgres_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
       config += `# PostgreSQL: ${backend.instanceName} (${backend.domain})\n`;
-      config += `# Domain: ${backend.domain} → Container Port: ${backend.port}\n`;
+      config += `# External: ${backend.domain}:5432 → HAProxy (SNI) → Internal: 127.0.0.1:${backend.port}\n`;
       config += `backend ${backendName}\n`;
       config += `    mode tcp\n`;
       config += `    option tcp-check\n`;
       config += `    server ${backend.instanceName} 127.0.0.1:${backend.port} check\n`;
       config += `\n`;
+      
+      // Log the routing configuration for debugging
+      // IMPORTANT: External port is 5432, internal port is backend.port
+      logger.info(
+        {
+          instanceName: backend.instanceName,
+          domain: backend.domain,
+          externalPort: 5432, // Users connect to domain:5432
+          internalPort: backend.port, // Container's internal port
+          backendName,
+          routing: `${backend.domain}:5432 → HAProxy (SNI) → 127.0.0.1:${backend.port}`
+        },
+        'Generated PostgreSQL backend configuration - domain routes to container port'
+      );
       
       // Validate: Ensure port is unique per instance
       const duplicatePort = postgresBackends.find(
@@ -951,14 +1298,32 @@ defaults
     // use direct ports per instance instead of shared 5432/3306.
 
     // MySQL backends
+    // IMPORTANT: External port is 3306, internal port is backend.port
+    // Users connect to: ${backend.domain}:3306
+    // HAProxy routes to: 127.0.0.1:${backend.port} (container's internal port)
     for (const backend of mysqlBackends) {
       const backendName = `mysql_${backend.instanceName.replace(/[^a-z0-9]/g, '_')}`;
       config += `# MySQL: ${backend.instanceName} (${backend.domain})\n`;
+      config += `# External: ${backend.domain}:3306 → HAProxy (SNI) → Internal: 127.0.0.1:${backend.port}\n`;
       config += `backend ${backendName}\n`;
       config += `    mode tcp\n`;
       config += `    option tcp-check\n`;
       config += `    server ${backend.instanceName} 127.0.0.1:${backend.port} check\n`;
       config += `\n`;
+      
+      // Log the routing configuration for debugging
+      // IMPORTANT: External port is 3306, internal port is backend.port
+      logger.info(
+        {
+          instanceName: backend.instanceName,
+          domain: backend.domain,
+          externalPort: 3306, // Users connect to domain:3306
+          internalPort: backend.port, // Container's internal port
+          backendName,
+          routing: `${backend.domain}:3306 → HAProxy (SNI) → 127.0.0.1:${backend.port}`
+        },
+        'Generated MySQL backend configuration - domain routes to container port'
+      );
     }
 
     // No MySQL pool when multiple databases; rely on SNI for TLS clients.
