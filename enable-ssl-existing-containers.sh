@@ -23,20 +23,73 @@ if ! docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
     exit 1
 fi
 
-# Check if certificates are mounted
-if ! docker exec "$CONTAINER_NAME" ls /var/lib/postgresql/ssl/ >/dev/null 2>&1; then
-    echo "❌ SSL certificates not found in container"
-    echo "   Expected: /var/lib/postgresql/ssl/"
-    exit 1
+# Get domain from backends.json
+DOMAIN=$(sudo cat /opt/n8n-daemon/haproxy/backends.json 2>/dev/null | jq -r ".[] | select(.instanceName == \"$CONTAINER_NAME\") | .domain" 2>/dev/null)
+
+if [ -z "$DOMAIN" ] || [ "$DOMAIN" = "null" ]; then
+    echo "⚠️  Could not find domain for container, will use default paths"
+    DOMAIN=""
 fi
 
-# Find certificate files
-CERT_FILE=$(docker exec "$CONTAINER_NAME" ls /var/lib/postgresql/ssl/*.crt /var/lib/postgresql/ssl/*.pem 2>/dev/null | head -1 | tr -d '\r')
-KEY_FILE=$(docker exec "$CONTAINER_NAME" ls /var/lib/postgresql/ssl/*.key /var/lib/postgresql/ssl/*.pem 2>/dev/null | head -1 | tr -d '\r')
+# Check if certificates are mounted or exist in container
+CERT_FILE=""
+KEY_FILE=""
 
+# First, check if certificates are already mounted
+if docker exec "$CONTAINER_NAME" ls /var/lib/postgresql/ssl/ >/dev/null 2>&1; then
+    CERT_FILE=$(docker exec "$CONTAINER_NAME" sh -c "ls /var/lib/postgresql/ssl/*.crt /var/lib/postgresql/ssl/*.pem 2>/dev/null | head -1" | tr -d '\r\n')
+    KEY_FILE=$(docker exec "$CONTAINER_NAME" sh -c "ls /var/lib/postgresql/ssl/*.key 2>/dev/null | head -1" | tr -d '\r\n')
+fi
+
+# If certificates not found, check on host and copy them
 if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
-    echo "❌ Certificate files not found"
-    exit 1
+    echo "⚠️  Certificates not mounted, checking host for certificates..."
+    
+    # Try to find certificates on host
+    INSTANCE_NAME=$(echo "$CONTAINER_NAME" | sed 's/postgres_//')
+    HOST_CERT_DIR="/opt/n8n-daemon/certs/$INSTANCE_NAME"
+    
+    if [ -d "$HOST_CERT_DIR" ]; then
+        # Find certificate files on host
+        HOST_CERT=$(find "$HOST_CERT_DIR" -name "*.crt" -o -name "fullchain.pem" 2>/dev/null | head -1)
+        HOST_KEY=$(find "$HOST_CERT_DIR" -name "*.key" -o -name "privkey.pem" 2>/dev/null | head -1)
+        
+        if [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
+            echo "Found certificates on host, copying to container..."
+            
+            # Create SSL directory in container
+            docker exec "$CONTAINER_NAME" mkdir -p /var/lib/postgresql/ssl
+            
+            # Copy certificates to container
+            docker cp "$HOST_CERT" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_CERT")"
+            docker cp "$HOST_KEY" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_KEY")"
+            
+            # Set permissions
+            docker exec "$CONTAINER_NAME" chmod 600 /var/lib/postgresql/ssl/*.key
+            docker exec "$CONTAINER_NAME" chmod 644 /var/lib/postgresql/ssl/*.crt /var/lib/postgresql/ssl/*.pem
+            docker exec "$CONTAINER_NAME" chown -R postgres:postgres /var/lib/postgresql/ssl
+            
+            CERT_FILE="/var/lib/postgresql/ssl/$(basename "$HOST_CERT")"
+            KEY_FILE="/var/lib/postgresql/ssl/$(basename "$HOST_KEY")"
+            
+            echo "✅ Certificates copied to container"
+        else
+            echo "❌ Certificate files not found on host at: $HOST_CERT_DIR"
+            echo ""
+            echo "You may need to:"
+            echo "1. Generate certificates using the daemon API"
+            echo "2. Or recreate the container (new containers will have SSL enabled automatically)"
+            exit 1
+        fi
+    else
+        echo "❌ Certificate directory not found on host: $HOST_CERT_DIR"
+        echo ""
+        echo "This container may have been created before SSL certificate mounting was implemented."
+        echo "Options:"
+        echo "1. Recreate the container (new containers will have SSL enabled automatically)"
+        echo "2. Generate certificates manually and copy them to the container"
+        exit 1
+    fi
 fi
 
 echo "Found certificates:"
