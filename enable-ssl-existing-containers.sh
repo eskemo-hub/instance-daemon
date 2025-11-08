@@ -167,25 +167,59 @@ echo "Current SSL status:"
 docker exec "$CONTAINER_NAME" psql -U postgres -c "SHOW ssl;" 2>/dev/null || echo "  Could not check SSL status"
 echo ""
 
+# Find postgresql.conf location
+echo "Finding postgresql.conf location..."
+PGDATA=$(docker exec "$CONTAINER_NAME" psql -U postgres -t -c "SHOW data_directory;" 2>/dev/null | tr -d ' \n\r' || echo "")
+if [ -z "$PGDATA" ]; then
+    # Try common locations
+    for PGDATA_PATH in "/var/lib/postgresql/data" "/var/lib/postgresql" "/data"; do
+        if docker exec "$CONTAINER_NAME" test -f "$PGDATA_PATH/postgresql.conf" 2>/dev/null; then
+            PGDATA="$PGDATA_PATH"
+            break
+        fi
+    done
+fi
+
+if [ -z "$PGDATA" ]; then
+    echo "⚠️  Could not find postgresql.conf, trying default location..."
+    PGDATA="/var/lib/postgresql/data"
+fi
+
+PG_CONF="$PGDATA/postgresql.conf"
+echo "Using PostgreSQL config: $PG_CONF"
+echo ""
+
 # Enable SSL in postgresql.conf
 echo "Enabling SSL in postgresql.conf..."
-docker exec "$CONTAINER_NAME" bash -c "
+if docker exec "$CONTAINER_NAME" test -f "$PG_CONF" 2>/dev/null; then
+    docker exec "$CONTAINER_NAME" bash -c "
 # Backup postgresql.conf
-cp /var/lib/postgresql/data/postgresql.conf /var/lib/postgresql/data/postgresql.conf.bak
+cp '$PG_CONF' '$PG_CONF.bak'
 
 # Add SSL configuration if not already present
-if ! grep -q '^ssl = on' /var/lib/postgresql/data/postgresql.conf; then
-    echo '' >> /var/lib/postgresql/data/postgresql.conf
-    echo '# SSL Configuration (enabled by enable-ssl script)' >> /var/lib/postgresql/data/postgresql.conf
-    echo 'ssl = on' >> /var/lib/postgresql/data/postgresql.conf
-    echo \"ssl_cert_file = '$CERT_FILE'\" >> /var/lib/postgresql/data/postgresql.conf
-    echo \"ssl_key_file = '$KEY_FILE'\" >> /var/lib/postgresql/data/postgresql.conf
-    echo 'ssl_min_protocol_version = '\''TLSv1.2'\''' >> /var/lib/postgresql/data/postgresql.conf
+if ! grep -q '^ssl = on' '$PG_CONF'; then
+    echo '' >> '$PG_CONF'
+    echo '# SSL Configuration (enabled by enable-ssl script)' >> '$PG_CONF'
+    echo 'ssl = on' >> '$PG_CONF'
+    echo \"ssl_cert_file = '$CERT_FILE'\" >> '$PG_CONF'
+    echo \"ssl_key_file = '$KEY_FILE'\" >> '$PG_CONF'
+    echo 'ssl_min_protocol_version = '\''TLSv1.2'\''' >> '$PG_CONF'
     echo '✅ SSL configuration added to postgresql.conf'
 else
     echo '⚠️  SSL already configured in postgresql.conf'
+    # Update certificate paths if they're different
+    sed -i \"s|ssl_cert_file =.*|ssl_cert_file = '$CERT_FILE'|\" '$PG_CONF'
+    sed -i \"s|ssl_key_file =.*|ssl_key_file = '$KEY_FILE'|\" '$PG_CONF'
+    echo '✅ Updated certificate paths'
 fi
 "
+else
+    echo "❌ postgresql.conf not found at $PG_CONF"
+    echo "Trying to find it..."
+    docker exec "$CONTAINER_NAME" find / -name "postgresql.conf" 2>/dev/null | head -5
+    echo ""
+    echo "⚠️  Could not locate postgresql.conf. SSL may need to be configured manually."
+fi
 
 # Reload PostgreSQL configuration
 echo ""
