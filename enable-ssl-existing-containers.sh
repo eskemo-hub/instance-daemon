@@ -47,47 +47,74 @@ if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
     
     # Try to find certificates on host
     INSTANCE_NAME=$(echo "$CONTAINER_NAME" | sed 's/postgres_//')
-    HOST_CERT_DIR="/opt/n8n-daemon/certs/$INSTANCE_NAME"
     
-    if [ -d "$HOST_CERT_DIR" ]; then
-        # Find certificate files on host
-        HOST_CERT=$(find "$HOST_CERT_DIR" -name "*.crt" -o -name "fullchain.pem" 2>/dev/null | head -1)
-        HOST_KEY=$(find "$HOST_CERT_DIR" -name "*.key" -o -name "privkey.pem" 2>/dev/null | head -1)
+    # Check multiple possible certificate locations
+    POSSIBLE_CERT_DIRS=(
+        "/opt/n8n-daemon/certs/$INSTANCE_NAME"
+        "$(pwd)/certs/$INSTANCE_NAME"
+        "~/instance-daemon/certs/$INSTANCE_NAME"
+        "/var/lib/n8n-daemon/certs/$INSTANCE_NAME"
+    )
+    
+    HOST_CERT_DIR=""
+    HOST_CERT=""
+    HOST_KEY=""
+    
+    for CERT_DIR in "${POSSIBLE_CERT_DIRS[@]}"; do
+        # Expand ~ if present
+        CERT_DIR=$(eval echo "$CERT_DIR")
         
-        if [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
-            echo "Found certificates on host, copying to container..."
+        if [ -d "$CERT_DIR" ]; then
+            HOST_CERT_DIR="$CERT_DIR"
+            # Find certificate files on host
+            HOST_CERT=$(find "$CERT_DIR" -name "*.crt" -o -name "fullchain.pem" 2>/dev/null | head -1)
+            HOST_KEY=$(find "$CERT_DIR" -name "*.key" -o -name "privkey.pem" 2>/dev/null | head -1)
             
-            # Create SSL directory in container
-            docker exec "$CONTAINER_NAME" mkdir -p /var/lib/postgresql/ssl
-            
-            # Copy certificates to container
-            docker cp "$HOST_CERT" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_CERT")"
-            docker cp "$HOST_KEY" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_KEY")"
-            
-            # Set permissions
-            docker exec "$CONTAINER_NAME" chmod 600 /var/lib/postgresql/ssl/*.key
-            docker exec "$CONTAINER_NAME" chmod 644 /var/lib/postgresql/ssl/*.crt /var/lib/postgresql/ssl/*.pem
-            docker exec "$CONTAINER_NAME" chown -R postgres:postgres /var/lib/postgresql/ssl
-            
-            CERT_FILE="/var/lib/postgresql/ssl/$(basename "$HOST_CERT")"
-            KEY_FILE="/var/lib/postgresql/ssl/$(basename "$HOST_KEY")"
-            
-            echo "✅ Certificates copied to container"
-        else
-            echo "❌ Certificate files not found on host at: $HOST_CERT_DIR"
-            echo ""
-            echo "You may need to:"
-            echo "1. Generate certificates using the daemon API"
-            echo "2. Or recreate the container (new containers will have SSL enabled automatically)"
-            exit 1
+            if [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
+                break
+            fi
         fi
+    done
+    
+    if [ -n "$HOST_CERT_DIR" ] && [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
+        echo "Found certificates on host at: $HOST_CERT_DIR"
+        echo "Copying to container..."
+        
+        # Create SSL directory in container
+        docker exec "$CONTAINER_NAME" mkdir -p /var/lib/postgresql/ssl
+        
+        # Copy certificates to container
+        docker cp "$HOST_CERT" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_CERT")"
+        docker cp "$HOST_KEY" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_KEY")"
+        
+        # Set permissions
+        docker exec "$CONTAINER_NAME" chmod 600 /var/lib/postgresql/ssl/*.key
+        docker exec "$CONTAINER_NAME" chmod 644 /var/lib/postgresql/ssl/*.crt /var/lib/postgresql/ssl/*.pem
+        docker exec "$CONTAINER_NAME" chown -R postgres:postgres /var/lib/postgresql/ssl
+        
+        CERT_FILE="/var/lib/postgresql/ssl/$(basename "$HOST_CERT")"
+        KEY_FILE="/var/lib/postgresql/ssl/$(basename "$HOST_KEY")"
+        
+        echo "✅ Certificates copied to container"
     else
-        echo "❌ Certificate directory not found on host: $HOST_CERT_DIR"
+        echo "❌ Certificate files not found on host"
+        echo ""
+        echo "Checked locations:"
+        for CERT_DIR in "${POSSIBLE_CERT_DIRS[@]}"; do
+            CERT_DIR=$(eval echo "$CERT_DIR")
+            echo "  - $CERT_DIR"
+        done
         echo ""
         echo "This container may have been created before SSL certificate mounting was implemented."
+        echo ""
         echo "Options:"
         echo "1. Recreate the container (new containers will have SSL enabled automatically)"
-        echo "2. Generate certificates manually and copy them to the container"
+        echo "2. Generate certificates using the daemon API, then run this script again"
+        echo ""
+        echo "To generate certificates, you can use the daemon API or create them manually:"
+        echo "  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \\"
+        echo "    -keyout /tmp/server.key -out /tmp/server.crt \\"
+        echo "    -subj \"/CN=$DOMAIN\""
         exit 1
     fi
 fi
