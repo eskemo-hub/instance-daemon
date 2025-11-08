@@ -49,10 +49,11 @@ if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
     INSTANCE_NAME=$(echo "$CONTAINER_NAME" | sed 's/postgres_//')
     
     # Check multiple possible certificate locations
+    # Note: Use sudo for checking /opt/n8n-daemon/ as it may require root access
     POSSIBLE_CERT_DIRS=(
         "/opt/n8n-daemon/certs/$INSTANCE_NAME"
-        "$(pwd)/certs/$INSTANCE_NAME"
-        "~/instance-daemon/certs/$INSTANCE_NAME"
+        "/home/$(whoami)/instance-daemon/certs/$INSTANCE_NAME"
+        "$HOME/instance-daemon/certs/$INSTANCE_NAME"
         "/var/lib/n8n-daemon/certs/$INSTANCE_NAME"
     )
     
@@ -60,32 +61,57 @@ if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
     HOST_CERT=""
     HOST_KEY=""
     
+    echo "Looking for certificates in:"
     for CERT_DIR in "${POSSIBLE_CERT_DIRS[@]}"; do
-        # Expand ~ if present
-        CERT_DIR=$(eval echo "$CERT_DIR")
+        echo "  - $CERT_DIR"
         
-        if [ -d "$CERT_DIR" ]; then
-            HOST_CERT_DIR="$CERT_DIR"
-            # Find certificate files on host
-            HOST_CERT=$(find "$CERT_DIR" -name "*.crt" -o -name "fullchain.pem" 2>/dev/null | head -1)
-            HOST_KEY=$(find "$CERT_DIR" -name "*.key" -o -name "privkey.pem" 2>/dev/null | head -1)
-            
-            if [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
-                break
+        # Use sudo for /opt/n8n-daemon/, regular check for others
+        if [[ "$CERT_DIR" == /opt/n8n-daemon/* ]] || [[ "$CERT_DIR" == /var/lib/n8n-daemon/* ]]; then
+            if sudo test -d "$CERT_DIR"; then
+                HOST_CERT_DIR="$CERT_DIR"
+                # Find certificate files on host (with sudo)
+                HOST_CERT=$(sudo find "$CERT_DIR" -name "*.crt" -o -name "fullchain.pem" 2>/dev/null | head -1)
+                HOST_KEY=$(sudo find "$CERT_DIR" -name "*.key" -o -name "privkey.pem" 2>/dev/null | head -1)
+                
+                if [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
+                    echo "  ✅ Found certificates!"
+                    break
+                fi
+            fi
+        else
+            if [ -d "$CERT_DIR" ]; then
+                HOST_CERT_DIR="$CERT_DIR"
+                # Find certificate files on host
+                HOST_CERT=$(find "$CERT_DIR" -name "*.crt" -o -name "fullchain.pem" 2>/dev/null | head -1)
+                HOST_KEY=$(find "$CERT_DIR" -name "*.key" -o -name "privkey.pem" 2>/dev/null | head -1)
+                
+                if [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
+                    echo "  ✅ Found certificates!"
+                    break
+                fi
             fi
         fi
     done
+    echo ""
     
     if [ -n "$HOST_CERT_DIR" ] && [ -n "$HOST_CERT" ] && [ -n "$HOST_KEY" ]; then
         echo "Found certificates on host at: $HOST_CERT_DIR"
+        echo "  Cert: $HOST_CERT"
+        echo "  Key: $HOST_KEY"
         echo "Copying to container..."
         
         # Create SSL directory in container
         docker exec "$CONTAINER_NAME" mkdir -p /var/lib/postgresql/ssl
         
-        # Copy certificates to container
-        docker cp "$HOST_CERT" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_CERT")"
-        docker cp "$HOST_KEY" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_KEY")"
+        # Copy certificates to container (use sudo if needed for /opt paths)
+        if [[ "$HOST_CERT_DIR" == /opt/n8n-daemon/* ]] || [[ "$HOST_CERT_DIR" == /var/lib/n8n-daemon/* ]]; then
+            # For system directories, we may need to use sudo to read, but docker cp should work
+            sudo docker cp "$HOST_CERT" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_CERT")"
+            sudo docker cp "$HOST_KEY" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_KEY")"
+        else
+            docker cp "$HOST_CERT" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_CERT")"
+            docker cp "$HOST_KEY" "$CONTAINER_NAME:/var/lib/postgresql/ssl/$(basename "$HOST_KEY")"
+        fi
         
         # Set permissions
         docker exec "$CONTAINER_NAME" chmod 600 /var/lib/postgresql/ssl/*.key
