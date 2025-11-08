@@ -170,55 +170,82 @@ echo ""
 # Find postgresql.conf location
 echo "Finding postgresql.conf location..."
 PGDATA=$(docker exec "$CONTAINER_NAME" psql -U postgres -t -c "SHOW data_directory;" 2>/dev/null | tr -d ' \n\r' || echo "")
-if [ -z "$PGDATA" ]; then
-    # Try common locations
-    for PGDATA_PATH in "/var/lib/postgresql/data" "/var/lib/postgresql" "/data"; do
+
+# Try to find postgresql.conf in the data directory or subdirectories
+PG_CONF=""
+if [ -n "$PGDATA" ]; then
+    # Check if postgresql.conf is directly in PGDATA
+    if docker exec "$CONTAINER_NAME" test -f "$PGDATA/postgresql.conf" 2>/dev/null; then
+        PG_CONF="$PGDATA/postgresql.conf"
+    else
+        # Check subdirectories (like pgdata/)
+        for SUBDIR in "pgdata" "data" ""; do
+            TEST_PATH="$PGDATA"
+            if [ -n "$SUBDIR" ]; then
+                TEST_PATH="$PGDATA/$SUBDIR"
+            fi
+            if docker exec "$CONTAINER_NAME" test -f "$TEST_PATH/postgresql.conf" 2>/dev/null; then
+                PG_CONF="$TEST_PATH/postgresql.conf"
+                break
+            fi
+        done
+    fi
+fi
+
+# If still not found, try common locations
+if [ -z "$PG_CONF" ]; then
+    for PGDATA_PATH in "/var/lib/postgresql/data/pgdata" "/var/lib/postgresql/data" "/var/lib/postgresql" "/data"; do
         if docker exec "$CONTAINER_NAME" test -f "$PGDATA_PATH/postgresql.conf" 2>/dev/null; then
-            PGDATA="$PGDATA_PATH"
+            PG_CONF="$PGDATA_PATH/postgresql.conf"
             break
         fi
     done
 fi
 
-if [ -z "$PGDATA" ]; then
-    echo "⚠️  Could not find postgresql.conf, trying default location..."
-    PGDATA="/var/lib/postgresql/data"
+if [ -z "$PG_CONF" ]; then
+    echo "⚠️  Could not find postgresql.conf automatically"
+    echo "Searching for postgresql.conf..."
+    PG_CONF=$(docker exec "$CONTAINER_NAME" find /var/lib/postgresql -name "postgresql.conf" 2>/dev/null | head -1)
+    if [ -z "$PG_CONF" ]; then
+        echo "❌ Could not locate postgresql.conf"
+        exit 1
+    fi
 fi
 
-PG_CONF="$PGDATA/postgresql.conf"
 echo "Using PostgreSQL config: $PG_CONF"
 echo ""
 
 # Enable SSL in postgresql.conf
 echo "Enabling SSL in postgresql.conf..."
 if docker exec "$CONTAINER_NAME" test -f "$PG_CONF" 2>/dev/null; then
-    docker exec "$CONTAINER_NAME" bash -c "
-# Backup postgresql.conf
-cp '$PG_CONF' '$PG_CONF.bak'
-
-# Add SSL configuration if not already present
-if ! grep -q '^ssl = on' '$PG_CONF'; then
-    echo '' >> '$PG_CONF'
-    echo '# SSL Configuration (enabled by enable-ssl script)' >> '$PG_CONF'
-    echo 'ssl = on' >> '$PG_CONF'
-    echo \"ssl_cert_file = '$CERT_FILE'\" >> '$PG_CONF'
-    echo \"ssl_key_file = '$KEY_FILE'\" >> '$PG_CONF'
-    echo 'ssl_min_protocol_version = '\''TLSv1.2'\''' >> '$PG_CONF'
-    echo '✅ SSL configuration added to postgresql.conf'
-else
-    echo '⚠️  SSL already configured in postgresql.conf'
-    # Update certificate paths if they're different
-    sed -i \"s|ssl_cert_file =.*|ssl_cert_file = '$CERT_FILE'|\" '$PG_CONF'
-    sed -i \"s|ssl_key_file =.*|ssl_key_file = '$KEY_FILE'|\" '$PG_CONF'
-    echo '✅ Updated certificate paths'
-fi
-"
+    # Backup postgresql.conf
+    docker exec "$CONTAINER_NAME" cp "$PG_CONF" "$PG_CONF.bak"
+    
+    # Check if SSL is already enabled
+    if docker exec "$CONTAINER_NAME" grep -q '^ssl = on' "$PG_CONF" 2>/dev/null; then
+        echo "⚠️  SSL already configured in postgresql.conf"
+        # Update certificate paths if they're different
+        docker exec "$CONTAINER_NAME" sed -i "s|ssl_cert_file =.*|ssl_cert_file = '$CERT_FILE'|" "$PG_CONF"
+        docker exec "$CONTAINER_NAME" sed -i "s|ssl_key_file =.*|ssl_key_file = '$KEY_FILE'|" "$PG_CONF"
+        echo "✅ Updated certificate paths"
+    else
+        # Add SSL configuration
+        echo "" | docker exec -i "$CONTAINER_NAME" sh -c "cat >> '$PG_CONF'"
+        echo "# SSL Configuration (enabled by enable-ssl script)" | docker exec -i "$CONTAINER_NAME" sh -c "cat >> '$PG_CONF'"
+        echo "ssl = on" | docker exec -i "$CONTAINER_NAME" sh -c "cat >> '$PG_CONF'"
+        echo "ssl_cert_file = '$CERT_FILE'" | docker exec -i "$CONTAINER_NAME" sh -c "cat >> '$PG_CONF'"
+        echo "ssl_key_file = '$KEY_FILE'" | docker exec -i "$CONTAINER_NAME" sh -c "cat >> '$PG_CONF'"
+        echo "ssl_min_protocol_version = 'TLSv1.2'" | docker exec -i "$CONTAINER_NAME" sh -c "cat >> '$PG_CONF'"
+        echo "✅ SSL configuration added to postgresql.conf"
+        
+        # Verify it was added
+        echo ""
+        echo "Verifying SSL settings:"
+        docker exec "$CONTAINER_NAME" grep -i "^ssl" "$PG_CONF" 2>/dev/null || echo "  ⚠️  SSL settings not found in config"
+    fi
 else
     echo "❌ postgresql.conf not found at $PG_CONF"
-    echo "Trying to find it..."
-    docker exec "$CONTAINER_NAME" find / -name "postgresql.conf" 2>/dev/null | head -5
-    echo ""
-    echo "⚠️  Could not locate postgresql.conf. SSL may need to be configured manually."
+    exit 1
 fi
 
 # Reload PostgreSQL configuration
